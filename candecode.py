@@ -50,6 +50,15 @@ import re
 import sys
 import time
 
+# The distributed .exe is built windowed (no console) so double-clicking it
+# doesn't pop a black terminal — but that means sys.stdout/stderr/stdin are
+# None (no console to attach to), and this script prints throughout. Redirect
+# to a null sink up front instead of guarding every print()/input() call.
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w")
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w")
+
 try:
     import numpy as np
 except ImportError:
@@ -1265,6 +1274,7 @@ def main():
                           dbc_baudrate=dbc_baudrate, baudrate_mismatch=baudrate_mismatch,
                           overload_warning=overload_warning)
 
+    saved = None
     if not args.no_excel:
         print("Writing Excel workbook…")
         xlsx = os.path.join(args.out, os.path.splitext(os.path.basename(args.log))[0] + "_decoded.xlsx")
@@ -1282,6 +1292,32 @@ def main():
 
     print(f"Done in {time.time() - t_start:.1f}s.")
 
+    if interactive:
+        # No console in the windowed .exe to see any of the above in — give
+        # the double-click user a real on-screen summary instead.
+        lines = [f"Decoded {len(series)} signal(s) from {len(matched)} message ID(s)."]
+        if bus_health is not None:
+            lines.append(f"Est. bus load: avg {bus_health['load_avg']:.1f}%  /  peak {bus_health['load_peak']:.1f}%.")
+        if saved:
+            lines.append(f"Workbook: {saved}")
+        lines.append(f"Output folder: {args.out}")
+        _show_gui_message("showinfo", "CANDecode — done", "\n".join(lines))
+
+
+def _show_gui_message(kind, title, msg):
+    """Best-effort messagebox — there's no console in the windowed .exe, so
+    without this a failure would just look like the app did nothing."""
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        getattr(messagebox, kind)(title, msg)
+        root.destroy()
+    except Exception:
+        pass
+
 
 if __name__ == "__main__":
     _flags = ("-h", "--help", "--version")
@@ -1293,11 +1329,14 @@ if __name__ == "__main__":
         if _interactive:
             if exc.code not in (0, None):
                 print(exc.code)
+                _show_gui_message("showerror", "CANDecode", str(exc.code))
         else:
             raise
-    except Exception:
+    except Exception as exc:
         import traceback
         traceback.print_exc()
+        if _interactive:
+            _show_gui_message("showerror", "CANDecode — error", f"{type(exc).__name__}: {exc}")
     finally:
         if _interactive and sys.stdin and sys.stdin.isatty():
             try:

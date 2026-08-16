@@ -122,9 +122,14 @@ No Python install needed for end users — build a single Windows executable:
 
 ```bash
 pip install pyinstaller
-pyinstaller --onefile --name CANDecode candecode.py
+pyinstaller --onefile --windowed --name CANDecode candecode.py
 # → dist/CANDecode.exe
 ```
+
+`--windowed` builds it without a console window, so double-clicking opens
+straight into the file-picker dialogs instead of a black terminal — the
+script detects this and redirects its own console output, and shows a
+message box for the final summary and any errors instead.
 
 `CANDecode.spec` (generated on first build) records the exact build config;
 re-run `pyinstaller CANDecode.spec` on later builds instead of retyping flags.
