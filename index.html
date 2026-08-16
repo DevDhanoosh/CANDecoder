@@ -241,7 +241,10 @@
         </div>
         <div class="field">
           <label>Bus bit rate (bit/s)</label>
-          <input type="text" id="baudrateInp" value="500000">
+          <div style="display:flex; gap:6px;">
+            <input type="text" id="baudrateInp" value="500000" style="flex:1;">
+            <button class="btn ghost" id="autoBaudBtn" type="button" title="Try each standard CAN bit rate and pick the lowest one that keeps peak bus load under 100% — a lower-bound hint, not a certified detection. Run a decode first.">Auto</button>
+          </div>
         </div>
       </div>
       <button class="btn primary block" id="runBtn" disabled>▶ Decode</button>
@@ -322,9 +325,12 @@
 
   <div class="stage">
     <div class="stage-head"><span class="stage-idx">08</span><h2>Support</h2></div>
-    <div class="subhead" style="margin:-6px 0 12px;">Question, bug, or feature idea? This opens your email app addressed to Dhanoosh.</div>
+    <div class="subhead" style="margin:-6px 0 12px;">Question, bug, or feature idea? This sends a message straight to Dhanoosh — no email app needed.</div>
     <textarea id="supportMsg" class="field" placeholder="Describe your issue or question…" style="width:100%; background:var(--well); border:1px solid var(--line); color:var(--ink); padding:9px; border-radius:3px; font-family:var(--sans); font-size:12.5px; min-height:80px; resize:vertical;"></textarea>
-    <button class="btn primary" id="supportSend" style="margin-top:12px;">Send via email →</button>
+    <div style="display:flex; align-items:center; gap:12px; margin-top:12px;">
+      <button class="btn primary" id="supportSend">Send →</button>
+      <span id="supportStatus" style="font-size:11px; color:var(--faint);"></span>
+    </div>
   </div>
 
   <footer>
@@ -347,7 +353,7 @@
   const checklistWrap = $('checklistWrap'), sigActions = $('sigActions');
   const selectAllBtn = $('selectAllBtn'), deselectAllBtn = $('deselectAllBtn');
   const statsWrap = $('statsWrap'), chartsWrap = $('chartsWrap');
-  const tolInput = $('tolInput'), baudrateInp = $('baudrateInp');
+  const tolInput = $('tolInput'), baudrateInp = $('baudrateInp'), autoBaudBtn = $('autoBaudBtn');
   const trimBar = $('trimBar'), trimStartInp = $('trimStartInp'), trimEndInp = $('trimEndInp');
   const trimApply = $('trimApply'), trimReset = $('trimReset'), trimInfo = $('trimInfo'), trimMode = $('trimMode');
   const roDate = $('roDate'), roStart = $('roStart'), roEnd = $('roEnd'), roDur = $('roDur'), roFrames = $('roFrames'), roSignals = $('roSignals');
@@ -768,6 +774,22 @@
     return { perId, bins, load, loadAvg, loadPeak };
   }
 
+  // Baud-rate suggestion: for a fixed number of bits transmitted in a fixed
+  // window, estimated load is inversely proportional to the assumed baud
+  // rate — a rate that's too low can push estimated load past 100%, which
+  // is physically impossible, so those rates are ruled out. This can only
+  // ELIMINATE rates that are too low; it can't distinguish the true rate
+  // from any higher one on a lightly-loaded bus, so treat the result as a
+  // lower bound, not a certified detection.
+  const STANDARD_BAUDRATES = [10000, 20000, 50000, 100000, 125000, 250000, 500000, 1000000];
+  function suggestBaudrate(frames, durSec){
+    for(const rate of STANDARD_BAUDRATES){
+      const h = evaluateBusHealth(frames, durSec, rate, STUFF_FACTOR);
+      if(h.loadPeak <= 100) return rate;
+    }
+    return null;
+  }
+
   function paintBusHealth(){
     const durSec = (trimEnd ?? logDur) - (trimStart ?? 0);
     const baudrate = parseFloat(baudrateInp.value) || 500000;
@@ -785,7 +807,11 @@
     if(overload){
       warnings.push(`Estimated peak bus load is ${health.loadPeak.toFixed(0)}%, which is impossible on a real `+
         `bus — the assumed baud rate (${(baudrate/1000).toFixed(0)} kbit/s) is very likely too low for this `+
-        `trace. Try the next standard speed up (e.g. 250000, 500000, 1000000).`);
+        `trace. Try the next standard speed up (e.g. 250000, 500000, 1000000), or click Auto.`);
+    } else if(health.loadPeak > 85){
+      warnings.push(`Estimated peak bus load is ${health.loadPeak.toFixed(0)}% — very high for a real bus. `+
+        `Not impossible, but worth double-checking the assumed baud rate (${(baudrate/1000).toFixed(0)} kbit/s) `+
+        `is actually correct — try Auto or the next standard speed up.`);
     }
     window.__lastDbcBaudrate = dbcBaudrate;
     healthWarnings.innerHTML = warnings.map(w=>`<div class="warnbox">⚠ ${escHtml(w)}</div>`).join('');
@@ -936,6 +962,19 @@
     paintBusHealth();
   });
   baudrateInp.addEventListener('change', ()=>{ if(allFrames.length) paintBusHealth(); });
+  autoBaudBtn.addEventListener('click', ()=>{
+    if(!allFrames.length){ log('Run a decode first, then Auto can suggest a bit rate.', 'err'); return; }
+    const fr = windowFrames(allFrames);
+    const durSec = (trimEnd ?? logDur) - (trimStart ?? 0);
+    const suggestion = suggestBaudrate(fr, durSec);
+    if(suggestion == null){
+      log('No standard bit rate (10 kbit/s–1 Mbit/s) keeps peak bus load under 100% for this trace — check the trace or DLCs.', 'err');
+      return;
+    }
+    baudrateInp.value = String(suggestion);
+    log(`Auto bit rate: ${(suggestion/1000).toFixed(0)} kbit/s is the lowest standard rate that keeps peak load ≤100% — a lower-bound hint, not a certified detection (see Bus Health warnings).`, 'info');
+    paintBusHealth();
+  });
 
   // ── stats table + charts (only for CHECKED signals) ─────
   function paintSelection(matched){
@@ -1207,31 +1246,52 @@
       framesSheet.addRow(['Time_s','Clock','CAN_ID','Type','Message','DLC','Data (hex)','B0','B1','B2','B3','B4','B5','B6','B7']);
       framesSheet.getRow(1).font = { bold:true };
       framesSheet.columns.forEach((c,i)=>{ c.width = i===6 ? 26 : (i<6 ? 11 : 5); });
-      const frameRows = framesV.map(f=>{
+      const FRAME_BUILD_CHUNK = 20000;
+      const frameRows = new Array(framesV.length);
+      for(let i=0;i<framesV.length;i++){
+        const f = framesV[i];
         const hex = f.bytes.map(b=>b.toString(16).toUpperCase().padStart(2,'0'));
         const row = [ +(f.t - t0).toFixed(4), secondsToClock(f.t), '0x'+f.id.toString(16).toUpperCase(),
           f.extended ? 'Ext':'Std', frameNameById[f.id] || '', f.dlc, hex.join(' ') ];
         for(let b=0;b<8;b++) row.push(b < hex.length ? hex[b] : '');
-        return row;
-      });
+        frameRows[i] = row;
+        if(i % FRAME_BUILD_CHUNK === FRAME_BUILD_CHUNK - 1){
+          setProg(`Frames (building) ${Math.round((i+1)/framesV.length*100)}%`);
+          await new Promise(r=>setTimeout(r,0));
+        }
+      }
       await appendRowsInChunks(framesSheet, frameRows, 5000, (done,total)=> setProg(`Frames ${Math.round(done/total*100)}%`));
 
       // Merged — every decoded signal, one column each
       setProg('Merging…');
       await new Promise(r=>setTimeout(r,0));
       const dataSheet = wb.addWorksheet(uniqueSheetName('Merged', usedNames));
+      const MERGE_CELL_LIMIT = 1500000;
       const allTimes = new Set();
-      allV.forEach(s=> s.points.forEach(p=>allTimes.add(+(p.t-t0).toFixed(4))));
-      const times = Array.from(allTimes).sort((a,b)=>a-b);
-      const ncell = times.length * allV.length;
-      if(ncell > 1500000){
-        dataSheet.addRow([`Merged sheet skipped: ${times.length} time points x ${allV.length} signals = ${ncell.toLocaleString()} cells exceeds the 1,500,000-cell limit.`]);
+      let overLimit = false;
+      for(let si=0; si<allV.length && !overLimit; si++){
+        const pts = allV[si].points;
+        for(let pi=0; pi<pts.length; pi++){
+          allTimes.add(+(pts[pi].t-t0).toFixed(4));
+          if(allTimes.size * allV.length > MERGE_CELL_LIMIT){ overLimit = true; break; }
+          if(pi % 200000 === 199999) await new Promise(r=>setTimeout(r,0));
+        }
+        setProg(`Merging (scanning) ${si+1}/${allV.length}`);
+        await new Promise(r=>setTimeout(r,0));
+      }
+      if(overLimit){
+        dataSheet.addRow([`Merged sheet skipped: too many time points x ${allV.length} signals exceeds the ${MERGE_CELL_LIMIT.toLocaleString()}-cell limit.`]);
         dataSheet.addRow(['Trim the time window, then export again.']);
         dataSheet.getRow(1).font = { bold:true };
       } else {
+        const times = Array.from(allTimes).sort((a,b)=>a-b);
         dataSheet.addRow(['Time_s', ...allV.map(s=>s.unit ? `${s.name} [${s.unit}]` : s.name)]);
         dataSheet.getRow(1).font = { bold:true };
-        const cols = allV.map(s=> nearestJoin(times, s.points.map(p=>({ t:p.t-t0, v:p.v })), tol));
+        const cols = [];
+        for(let si=0; si<allV.length; si++){
+          cols.push(nearestJoin(times, allV[si].points.map(p=>({ t:p.t-t0, v:p.v })), tol));
+          if(si % 8 === 7){ setProg(`Merging (aligning) ${si+1}/${allV.length}`); await new Promise(r=>setTimeout(r,0)); }
+        }
         const mergedRows = new Array(times.length);
         for(let i=0;i<times.length;i++){
           const row = new Array(allV.length + 1);
@@ -1284,14 +1344,30 @@
     }
   });
 
-  // ── support (mailto — no backend, opens the visitor's own email app) ──
+  // ── support (sent directly via FormSubmit — no local email app needed) ──
   const supportSend = document.getElementById('supportSend');
+  const supportStatus = document.getElementById('supportStatus');
   if(supportSend){
-    supportSend.addEventListener('click', ()=>{
-      const msg = document.getElementById('supportMsg').value.trim();
-      const subject = encodeURIComponent('CANDecode support');
-      const body = encodeURIComponent(msg || '(describe your issue here)');
-      window.location.href = `mailto:dhanoosh2001@gmail.com?subject=${subject}&body=${body}`;
+    supportSend.addEventListener('click', async ()=>{
+      const msgEl = document.getElementById('supportMsg');
+      const msg = msgEl.value.trim();
+      if(!msg){ supportStatus.textContent = 'Write a message first.'; return; }
+      supportSend.disabled = true;
+      supportStatus.textContent = 'Sending…';
+      try{
+        const res = await fetch('https://formsubmit.co/ajax/dhanoosh2001@gmail.com', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+          body: JSON.stringify({ _subject: 'CANDecode support', message: msg })
+        });
+        if(!res.ok) throw new Error('request failed');
+        supportStatus.textContent = 'Sent ✓ — thanks, you\'ll hear back by email if needed.';
+        msgEl.value = '';
+      } catch(err){
+        supportStatus.textContent = 'Send failed — email dhanoosh2001@gmail.com directly instead.';
+      } finally {
+        supportSend.disabled = false;
+      }
     });
   }
 })();
