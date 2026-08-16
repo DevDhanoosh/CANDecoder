@@ -1134,6 +1134,44 @@ def interactive_setup(args):
     return args
 
 
+def ask_baudrate_interactively():
+    """Prompt for a bit rate when it wasn't found anywhere. Tries a Tk
+    dialog first — required in the windowed .exe, where sys.stdin is None
+    and input() raises 'RuntimeError: input(): lost sys.stdin' outright.
+    Falls back to a console prompt only if Tk genuinely isn't available
+    (headless) — a Cancel on the dialog means give up, not try the console
+    too. Returns None if nothing usable was given."""
+    used_dialog = False
+    raw = None
+    try:
+        import tkinter as tk
+        from tkinter import simpledialog
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        used_dialog = True
+        raw = simpledialog.askstring(
+            "CANDecode",
+            "Bus bit rate wasn't found in the log or a DBC.\n"
+            "Enter it in bit/s (e.g. 500000, 250000, 125000):",
+            parent=root)
+        root.destroy()
+    except Exception:
+        used_dialog = False  # no Tk (headless) — fall through to a console prompt
+
+    if not used_dialog and sys.stdin and sys.stdin.isatty():
+        raw = input("  Bus bit rate wasn't found in the log or a DBC. "
+                    "Enter it in bit/s (e.g. 500000, 250000, 125000): ").strip()
+
+    if raw is None:
+        return None
+    try:
+        v = float(raw)
+        return v if v > 0 else None
+    except ValueError:
+        return None
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="CANDecode — DBC-guided CAN log decoder (open source).",
@@ -1219,18 +1257,9 @@ def main():
         args.baudrate = log_baudrate or dbc_baudrate
         if args.baudrate is None:
             if interactive:
-                while args.baudrate is None:
-                    raw = input("  Bus bit rate wasn't found in the log or a DBC. "
-                                 "Enter it in bit/s (e.g. 500000, 250000, 125000): ").strip()
-                    try:
-                        v = float(raw)
-                        if v > 0:
-                            args.baudrate = v
-                    except ValueError:
-                        pass
-            else:
-                sys.exit("Bus bit rate wasn't found in the log header or a DBC's BS_: record — "
-                         "pass --baudrate explicitly (e.g. --baudrate 500000).")
+                args.baudrate = ask_baudrate_interactively()
+            if args.baudrate is None:
+                sys.exit("No bus bit rate given — re-run with --baudrate (e.g. --baudrate 500000).")
     baudrate_mismatch = None
     reference_rate = log_baudrate or dbc_baudrate
     if baudrate_explicit and reference_rate and abs(args.baudrate - reference_rate) > max(1.0, 0.01 * reference_rate):
