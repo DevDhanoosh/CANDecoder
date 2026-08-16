@@ -3,14 +3,11 @@
 CAN Signal Bench — desktop GUI for can_log_analyzer.
 
 A graphical front-end mirroring the HTML tool, plus a Bus Health workspace
-(per-ID timing, estimated bus load %) and a Vehicle Dynamics workspace that
-derives regen recovery, energy/power consumption, efficiency, distance and
-more from the decoded signals.
+(per-ID timing, estimated bus load %).
 
 Load up to 10 DBCs and a CAN trace (BUSMASTER .log/.asc or IXXAT MiniMon .csv),
 tick the signals you want, browse stats and plots, trim by clock time or a drag
-on the plot, map signals to physical roles for the dynamics report, choose which
-sheets to export, and save a decoded .xlsx.
+on the plot, choose which sheets to export, and save a decoded .xlsx.
 
 Reuses decode / parse / export logic from can_log_analyzer.py — keep both files
 in the SAME folder.
@@ -89,51 +86,13 @@ THEMES = {
                   head="#f0f3f8", stripe="#f6f9fc"),
 }
 
-# physical roles for the vehicle-dynamics calculations, with name hints.
-# hints are matched separator-insensitively (see _norm), most specific first,
-# so the battery signals win over DC-DC / OBC currents on multi-node DBCs.
-ROLES = [
-    ("speed",        "Vehicle speed",   ["vehiclespeed", "vehspeed", "hudspeed", "vspeed", "vspd", "speed"]),
-    ("batt_volt",    "Battery voltage", ["batteryvoltage", "packvoltage", "battvolt", "hvvolt", "dcvolt", "vbat", "vdc", "voltage"]),
-    ("batt_curr",    "Battery current", ["batterycurrent", "packcurrent", "battcurr", "hvcurr", "ibat", "idc", "current"]),
-    ("motor_torque", "Motor torque",    ["motoractualtorque", "actualtorque", "motortorque", "torque", "trq"]),
-    ("motor_speed",  "Motor speed",     ["motorrpm", "motorspeed", "rotorspeed", "motspeed", "rpm"]),
-    ("soc",          "State of charge", ["batterysoc", "soc", "stateofcharge"]),
-    ("odometer",     "Odometer",        ["totaldistancekm", "totaldistance", "distancetravelled", "odometer", "odo"]),
-]
 SECTIONS = [
     ("bus_health", "Bus Health (per-ID timing, load %)"),
-    ("dynamics",   "Vehicle Dynamics"),
-    ("components", "Components (per-subsystem)"),
-    ("faults",     "Faults (episodes)"),
     ("summary",    "Summary (stats)"),
     ("frames",     "CAN Frames (raw trace)"),
     ("merged",     "Merged (time-aligned, all DBC signals)"),
     ("charts",     "Charts (embedded plots, selected signals)"),
 ]
-FAULT_HINTS = ["fault", "error", "dtc", "trip", "warn", "fail", "alarm",
-               "malfunction", "overtemp", "overcurrent", "overvolt", "undervolt"]
-
-# component / subsystem classification (checked in order; first match wins).
-# matched separator-insensitively against "<message name> <signal name>".
-COMPONENTS = [
-    ("EPAS",    ["epas", "eps", "steer", "sas", "handwheel", "column", "torquesensor", "steeringangle"]),
-    ("BMS",     ["bms", "battery", "cell", "pack", "soc", "amphour", "contactor", "insulation", "isolation"]),
-    ("DC-DC",   ["dcdc", "dclink", "dc_dc", "converter", "lvbatt", "lvdc", "auxbatt", "12v", "lowvoltage"]),
-    ("OBC",     ["obc", "charger", "charging", "chargeport", "evse"]),
-    ("MCU",     ["mcu", "mc_", "motor", "mtr", "inverter", "igbt", "stator", "rotor", "phase", "torque", "rpm", "statusmotor"]),
-    ("Vehicle", ["vcu", "hud", "vehicle", "speed", "brake", "throttle", "accel", "pedal", "gear",
-                 "drive", "odo", "distance", "door", "light", "horn", "wiper", "hvac", "cluster"]),
-]
-COMPONENT_ORDER = [c for c, _ in COMPONENTS] + ["Other"]
-
-
-def classify_component(msg_name, sig_name):
-    hay = _norm(f"{msg_name} {sig_name}")
-    for comp, keys in COMPONENTS:
-        if any(_norm(k) in hay for k in keys):
-            return comp
-    return "Other"
 
 
 def decimate(t, v, max_n=6000):
@@ -141,202 +100,6 @@ def decimate(t, v, max_n=6000):
         return t, v
     step = int(np.ceil(len(t) / max_n))
     return t[::step], v[::step]
-
-
-def _trapz(y, x):
-    return float(np.trapezoid(y, x)) if len(x) > 1 else 0.0
-
-
-def detect_faults(items, mode, threshold, max_per_signal=2000):
-    """
-    Accumulate fault episodes from one or more signals.
-
-    items     : list of (name, t_ndarray, v_ndarray)  (already trimmed)
-    mode       : 'code'  -> active when value != 0 (episode key = the code value)
-                 'flag'  -> active when value >= threshold (episode key = 1)
-    threshold  : float, used only in 'flag' mode
-    max_per_signal : signals that produce more episodes than this are treated as
-                 continuous/counter signals (not discrete faults) and skipped.
-    returns    : (episodes, skipped) where episodes is a list of
-                 (name, code, start_abs, end_abs) sorted by start time, and
-                 skipped is the list of signal names that blew the cap.
-    """
-    out, skipped = [], []
-    for name, t, v in items:
-        if len(t) == 0:
-            continue
-        if mode == "flag":
-            codes = np.where(v >= threshold, 1, 0).astype(int)
-        else:
-            codes = np.rint(v).astype(int)          # 0 == inactive, else fault code
-        eps, prev, start = [], 0, None
-        for k in range(len(t)):
-            code = int(codes[k])
-            if code != prev:
-                if prev != 0 and start is not None:
-                    eps.append((name, prev, start, float(t[k])))
-                start = float(t[k]) if code != 0 else None
-                prev = code
-                if len(eps) > max_per_signal:
-                    break
-        if len(eps) > max_per_signal:
-            skipped.append(name)
-            continue
-        if prev != 0 and start is not None:
-            eps.append((name, prev, start, float(t[-1])))
-        out.extend(eps)
-    out.sort(key=lambda r: r[2])
-    return out, skipped
-
-
-def _norm(s):
-    return re.sub(r"[^a-z0-9]", "", s.lower())
-
-
-# tokens that mark a signal as a setpoint/limit/counter rather than a live
-# feedback value — de-prioritised in auto-mapping (still used if nothing else)
-_AVOID = ("count", "cou", "limit", "demand", "target", "request",
-          "setpoint", "maximum", "minimum", "estimate")
-
-
-def guess_roles(names):
-    """Map physical roles to signal names, separator-insensitively.
-    Most-specific hints win; battery signals beat DC-DC / OBC currents; and
-    live feedback signals beat counters/limits/demands/targets. Returns
-    dict role_id -> name (or '— none —')."""
-    norm = [(n, _norm(n)) for n in names]
-    used, out = set(), {}
-    for rid, _, hints in ROLES:
-        pick = "— none —"
-        for skip_avoid in (True, False):          # first pass avoids setpoints
-            for hint in hints:
-                h = _norm(hint)
-                for n, nn in norm:
-                    if n in used or h not in nn:
-                        continue
-                    if skip_avoid and any(a in nn for a in _AVOID):
-                        continue
-                    pick = n; used.add(n); break
-                if pick != "— none —":
-                    break
-            if pick != "— none —":
-                break
-        out[rid] = pick
-    return out
-
-
-def compute_dynamics(roles, opts):
-    """
-    roles : dict role -> (t_ndarray, v_ndarray, unit_str)  (already trimmed)
-    opts  : dict(speed_unit, mass, payload)
-    returns (rows, raw, timeseries):
-       rows       = list of (metric, value_str, unit)
-       raw        = dict of numeric results
-       timeseries = (grid_abs, power_w, cum_energy_wh) or None
-    """
-    present = {k: v for k, v in roles.items() if v is not None}
-    if not present:
-        return [("Map at least one signal to a role.", "", "")], {}, None
-
-    t_lo = max(v[0].min() for v in present.values())
-    t_hi = min(v[0].max() for v in present.values())
-    if t_hi <= t_lo:
-        return [("Mapped signals have no overlapping time range.", "", "")], {}, None
-    grid = np.unique(np.concatenate([v[0] for v in present.values()]))
-    grid = grid[(grid >= t_lo) & (grid <= t_hi)]
-    if len(grid) < 2:
-        return [("Not enough overlapping samples.", "", "")], {}, None
-
-    def g(role):
-        if role not in present:
-            return None
-        t, v, u = present[role]
-        return np.interp(grid, t, v), (u or "")
-
-    rows, raw = [], {}
-    rows.append(("Window duration", f"{float(grid[-1]-grid[0]):.2f}", "s"))
-
-    # ── electrical power = battery voltage × current (sign is in the CAN data)
-    power = None
-    v = g("batt_volt"); i = g("batt_curr")
-    if v is not None and i is not None:
-        power = v[0] * i[0]                             # +ve = discharge (per BMS sign)
-    if power is not None:
-        edis = _trapz(np.clip(power, 0, None), grid) / 3600.0
-        ereg = -_trapz(np.clip(power, None, 0), grid) / 3600.0
-        enet = _trapz(power, grid) / 3600.0
-        pos, neg = power[power > 0], power[power < 0]
-        used_avg = float(pos.mean()) / 1000.0 if pos.size else 0.0     # kW, discharge only
-        regen_avg = -float(neg.mean()) / 1000.0 if neg.size else 0.0   # kW, regen only
-        peak_dis = max(0.0, float(power.max())) / 1000.0
-        peak_reg = max(0.0, -float(power.min())) / 1000.0
-        raw.update(discharge_wh=edis, regen_wh=ereg, net_wh=enet,
-                   used_avg_kw=used_avg, regen_avg_kw=regen_avg)
-        rows += [
-            ("Energy consumed (discharge)", f"{edis:.1f}", "Wh"),
-            ("Energy recovered (regen)", f"{ereg:.1f}", "Wh"),
-            ("Net battery energy", f"{enet:.1f}", "Wh"),
-            ("Regen recovery", f"{(ereg/edis*100):.1f}" if edis > 0 else "—", "%"),
-            ("Used power (avg discharge)", f"{used_avg:.2f}", "kW"),
-            ("Regen power (avg)", f"{regen_avg:.2f}", "kW"),
-            ("Peak discharge power", f"{peak_dis:.2f}", "kW"),
-            ("Peak regen power", f"{peak_reg:.2f}", "kW"),
-            ("Average net power", f"{float(power.mean())/1000:.2f}", "kW"),
-        ]
-
-    # ── speed / distance / accel ────────────────────────────────────────────
-    sp = g("speed"); dist_km = None
-    if sp is not None:
-        kmh = sp[0] * 3.6 if opts.get("speed_unit") == "m/s" else sp[0]
-        ms = kmh / 3.6
-        dist_km = _trapz(ms, grid) / 1000.0
-        raw["distance_km"] = dist_km
-        accel = np.gradient(ms, grid)
-        rows += [
-            ("Distance travelled", f"{dist_km:.3f}", "km"),
-            ("Average speed", f"{float(kmh.mean()):.1f}", "km/h"),
-            ("Max speed", f"{float(kmh.max()):.1f}", "km/h"),
-            ("Max acceleration", f"{float(accel.max()):.2f}", "m/s²"),
-            ("Max deceleration", f"{float(accel.min()):.2f}", "m/s²"),
-        ]
-
-    # ── efficiency ──────────────────────────────────────────────────────────
-    if power is not None and dist_km and dist_km > 1e-6:
-        eff = raw["net_wh"] / dist_km
-        raw["efficiency_wh_km"] = eff
-        rows.append(("Energy efficiency", f"{eff:.1f}", "Wh/km"))
-        rows.append(("Range per kWh", f"{1000.0/eff:.1f}" if eff > 0 else "—", "km/kWh"))
-
-    # ── motor mechanical power ──────────────────────────────────────────────
-    trq = g("motor_torque"); rpm = g("motor_speed")
-    if trq is not None and rpm is not None:
-        pmech = trq[0] * rpm[0] * np.pi / 30.0            # W  (τ·ω, ω = rpm·2π/60)
-        emech = _trapz(np.clip(pmech, 0, None), grid) / 3600.0
-        rows += [
-            ("Motor mechanical energy", f"{emech:.1f}", "Wh"),
-            ("Peak mechanical power", f"{float(pmech.max())/1000:.2f}", "kW"),
-        ]
-        if power is not None and raw.get("discharge_wh", 0) > 0:
-            rows.append(("Drivetrain efficiency (mech/elec)",
-                         f"{emech/raw['discharge_wh']*100:.1f}", "%"))
-
-    # ── SoC ─────────────────────────────────────────────────────────────────
-    soc = g("soc")
-    if soc is not None:
-        rows.append(("SoC change", f"{float(soc[0][-1]-soc[0][0]):+.1f}", "%"))
-        rows.append(("SoC range", f"{float(soc[0].min()):.1f} – {float(soc[0].max()):.1f}", "%"))
-
-    # ── kinetic energy (needs mass + speed) ─────────────────────────────────
-    gross = (opts.get("mass") or 0.0) + (opts.get("payload") or 0.0)
-    if gross and sp is not None:
-        ms_peak = float((kmh.max()) / 3.6)
-        rows.append(("Peak kinetic energy", f"{0.5*gross*ms_peak**2/3600:.1f}", "Wh"))
-
-    ts = None
-    if power is not None:
-        cum = np.concatenate([[0.0], np.cumsum((power[1:] + power[:-1]) / 2 * np.diff(grid))]) / 3600.0
-        ts = (grid, power, cum)
-    return rows, raw, ts
 
 
 class App:
@@ -351,11 +114,6 @@ class App:
         self.span = None
         self.busy = False
         self.sig_vars = []
-        self.fault_vars = []
-        self.dyn_rows = []
-        self.fault_rows = []
-        self.comp_groups = {}
-        self._dyn_ts = None
         self.bus_health = None
 
         root.title("CAN Signal Bench")
@@ -385,7 +143,7 @@ class App:
             params = inspect.signature(core.export_excel).parameters
         except (ValueError, TypeError):
             return
-        missing = [k for k in ("components", "progress", "faults", "dynamics", "bus_health") if k not in params]
+        missing = [k for k in ("progress", "bus_health") if k not in params]
         if "analyze_bus_health" not in dir(core):
             missing.append("analyze_bus_health")
         if missing:
@@ -474,9 +232,6 @@ class App:
         t2 = ttk.Frame(self.nb, style="TFrame"); self.nb.add(t2, text="Traces"); self._build_traces_tab(t2)
         t_bus = ttk.Frame(self.nb, style="TFrame"); self.nb.add(t_bus, text="Bus Health"); self._build_bus_health_tab(t_bus)
         t3 = ttk.Frame(self.nb, style="TFrame"); self.nb.add(t3, text="Overlay"); self._build_overlay_tab(t3)
-        t4 = ttk.Frame(self.nb, style="TFrame"); self.nb.add(t4, text="Dynamics"); self._build_dynamics_tab(t4)
-        t5 = ttk.Frame(self.nb, style="TFrame"); self.nb.add(t5, text="Components"); self._build_components_tab(t5)
-        t6 = ttk.Frame(self.nb, style="TFrame"); self.nb.add(t6, text="Faults"); self._build_faults_tab(t6)
         t7 = ttk.Frame(self.nb, style="TFrame"); self.nb.add(t7, text="Report"); self._build_report_tab(t7)
 
         bar = ttk.Frame(p, style="TFrame"); bar.pack(fill="x", pady=(8, 0))
@@ -511,6 +266,10 @@ class App:
         for cc, w in dict(unit=55, n=70, min=80, max=80, mean=80, std=80).items():
             self.stats.heading(cc, text=cc.capitalize()); self.stats.column(cc, width=w, anchor="e")
         self.stats.pack(fill="both", expand=True)
+        # a Panedwindow with no explicit sash position can lay out its
+        # weight=0 pane almost collapsed until the user manually drags it —
+        # give the signal checklist a sane starting width instead.
+        self.root.after(80, lambda: paned.sashpos(0, 300))
 
     def _build_traces_tab(self, p):
         self.fig_tr = Figure(figsize=(7, 4.6), dpi=100)
@@ -582,103 +341,9 @@ class App:
         self.fig_bus = Figure(figsize=(6, 3.8), dpi=100)
         self.canvas_bus = FigureCanvasTkAgg(self.fig_bus, master=pf)
         self.canvas_bus.get_tk_widget().pack(fill="both", expand=True)
-
-    def _build_dynamics_tab(self, p):
-        top = ttk.Frame(p, style="TFrame"); top.pack(fill="x")
-        mapc = ttk.Frame(top, style="Card.TFrame", padding=10); mapc.pack(side="left", fill="y", padx=(0, 10))
-        ttk.Label(mapc, text="MAP SIGNALS TO ROLES", style="Head.TLabel").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
-        self.role_combos = {}
-        for i, (rid, label, _) in enumerate(ROLES):
-            ttk.Label(mapc, text=label, style="Card.TLabel").grid(row=i + 1, column=0, sticky="w", pady=2)
-            cb = ttk.Combobox(mapc, width=24, state="readonly"); cb.grid(row=i + 1, column=1, padx=(10, 0), pady=2)
-            self.role_combos[rid] = cb
-
-        optc = ttk.Frame(top, style="Card.TFrame", padding=10); optc.pack(side="left", fill="y")
-        ttk.Label(optc, text="OPTIONS", style="Head.TLabel").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
-        ttk.Label(optc, text="Speed unit", style="Card.TLabel").grid(row=1, column=0, sticky="w", pady=2)
-        self.opt_speed = ttk.Combobox(optc, values=["km/h", "m/s"], width=10, state="readonly")
-        self.opt_speed.current(0); self.opt_speed.grid(row=1, column=1, padx=(10, 0))
-        ttk.Label(optc, text="Vehicle mass (kg)", style="Card.TLabel").grid(row=2, column=0, sticky="w", pady=2)
-        self.opt_mass = ttk.Entry(optc, width=12); self.opt_mass.grid(row=2, column=1, padx=(10, 0))
-        ttk.Label(optc, text="Payload (kg)", style="Card.TLabel").grid(row=3, column=0, sticky="w", pady=2)
-        self.opt_payload = ttk.Entry(optc, width=12); self.opt_payload.grid(row=3, column=1, padx=(10, 0))
-        ttk.Button(optc, text="Compute dynamics  ⚙", style="Accent.TButton",
-                   command=self.compute_dyn).grid(row=4, column=0, columnspan=2, sticky="ew", pady=(10, 0))
-
-        mid = ttk.Panedwindow(p, orient="horizontal"); mid.pack(fill="both", expand=True, pady=(10, 0))
-        rf = ttk.Frame(mid, style="TFrame"); mid.add(rf, weight=0)
-        self.dyn_tree = ttk.Treeview(rf, columns=("value", "unit"), show="tree headings", height=16)
-        self.dyn_tree.heading("#0", text="Metric"); self.dyn_tree.column("#0", width=240, anchor="w")
-        self.dyn_tree.heading("value", text="Value"); self.dyn_tree.column("value", width=120, anchor="e")
-        self.dyn_tree.heading("unit", text="Unit"); self.dyn_tree.column("unit", width=70, anchor="w")
-        self.dyn_tree.pack(fill="both", expand=True)
-
-        pf = ttk.Frame(mid, style="TFrame"); mid.add(pf, weight=1)
-        self.fig_dyn = Figure(figsize=(6, 3.8), dpi=100)
-        self.canvas_dyn = FigureCanvasTkAgg(self.fig_dyn, master=pf)
-        self.canvas_dyn.get_tk_widget().pack(fill="both", expand=True)
-
-    def _build_components_tab(self, p):
-        paned = ttk.Panedwindow(p, orient="horizontal"); paned.pack(fill="both", expand=True)
-
-        lf = ttk.Frame(paned, style="Card.TFrame", padding=10); paned.add(lf, weight=0)
-        ttk.Label(lf, text="SUBSYSTEM", style="Head.TLabel").pack(anchor="w", pady=(0, 6))
-        self.comp_list = ttk.Treeview(lf, columns=("n",), show="tree headings",
-                                      height=12, selectmode="browse")
-        self.comp_list.heading("#0", text="Component"); self.comp_list.column("#0", width=130, anchor="w")
-        self.comp_list.heading("n", text="Signals"); self.comp_list.column("n", width=64, anchor="e")
-        self.comp_list.pack(fill="both", expand=True)
-        self.comp_list.bind("<<TreeviewSelect>>", lambda e: self._on_component_select())
-
-        rf = ttk.Frame(paned, style="TFrame"); paned.add(rf, weight=1)
-        cols = ("unit", "n", "min", "max", "mean", "std")
-        self.comp_stats = ttk.Treeview(rf, columns=cols, show="tree headings", height=20)
-        self.comp_stats.heading("#0", text="Signal"); self.comp_stats.column("#0", width=190, anchor="w")
-        for cc, w in dict(unit=60, n=70, min=85, max=85, mean=85, std=85).items():
-            self.comp_stats.heading(cc, text=cc.capitalize()); self.comp_stats.column(cc, width=w, anchor="e")
-        self.comp_stats.pack(fill="both", expand=True)
-
-    def _build_faults_tab(self, p):
-        top = ttk.Frame(p, style="TFrame"); top.pack(fill="x")
-
-        selc = ttk.Frame(top, style="Card.TFrame", padding=10); selc.pack(side="left", fill="y", padx=(0, 10))
-        hd = ttk.Frame(selc, style="Card.TFrame"); hd.pack(fill="x")
-        ttk.Label(hd, text="FAULT SIGNALS", style="Head.TLabel").pack(side="left")
-        ttk.Button(hd, text="All", width=4, style="Ghost.TButton",
-                   command=lambda: self._fault_all(True)).pack(side="right")
-        ttk.Button(hd, text="None", width=5, style="Ghost.TButton",
-                   command=lambda: self._fault_all(False)).pack(side="right", padx=4)
-        wrap = ttk.Frame(selc, style="Card.TFrame"); wrap.pack(fill="both", expand=True, pady=(6, 0))
-        self.flt_canvas = tk.Canvas(wrap, highlightthickness=0, width=260, height=220)
-        fsb = ttk.Scrollbar(wrap, orient="vertical", command=self.flt_canvas.yview)
-        self.flt_inner = ttk.Frame(self.flt_canvas, style="Card.TFrame")
-        self.flt_inner.bind("<Configure>", lambda e: self.flt_canvas.configure(scrollregion=self.flt_canvas.bbox("all")))
-        self.flt_canvas.create_window((0, 0), window=self.flt_inner, anchor="nw")
-        self.flt_canvas.configure(yscrollcommand=fsb.set)
-        self.flt_canvas.pack(side="left", fill="both", expand=True); fsb.pack(side="right", fill="y")
-
-        optc = ttk.Frame(top, style="Card.TFrame", padding=10); optc.pack(side="left", fill="y")
-        ttk.Label(optc, text="OPTIONS", style="Head.TLabel").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
-        ttk.Label(optc, text="Active when", style="Card.TLabel").grid(row=1, column=0, sticky="w", pady=2)
-        self.flt_mode = ttk.Combobox(optc, values=["value ≠ 0 (code)", "value ≥ threshold (flag)"],
-                                     width=22, state="readonly")
-        self.flt_mode.current(0); self.flt_mode.grid(row=1, column=1, padx=(10, 0))
-        ttk.Label(optc, text="Threshold", style="Card.TLabel").grid(row=2, column=0, sticky="w", pady=2)
-        self.flt_thr = ttk.Entry(optc, width=10); self.flt_thr.insert(0, "0.5")
-        self.flt_thr.grid(row=2, column=1, sticky="w", padx=(10, 0))
-        ttk.Button(optc, text="Detect faults  ⚑", style="Accent.TButton",
-                   command=self.detect_faults_ui).grid(row=3, column=0, columnspan=2, sticky="ew", pady=(10, 0))
-        self.flt_summary = ttk.Label(optc, text="", style="Dim.TLabel", wraplength=200, justify="left")
-        self.flt_summary.grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 0))
-
-        cols = ("code", "start", "end", "dur")
-        self.flt_tree = ttk.Treeview(p, columns=cols, show="tree headings", height=14)
-        self.flt_tree.heading("#0", text="Signal"); self.flt_tree.column("#0", width=200, anchor="w")
-        self.flt_tree.heading("code", text="Code/Value"); self.flt_tree.column("code", width=90, anchor="e")
-        self.flt_tree.heading("start", text="Start"); self.flt_tree.column("start", width=130, anchor="center")
-        self.flt_tree.heading("end", text="End"); self.flt_tree.column("end", width=130, anchor="center")
-        self.flt_tree.heading("dur", text="Duration (s)"); self.flt_tree.column("dur", width=100, anchor="e")
-        self.flt_tree.pack(fill="both", expand=True, pady=(10, 0))
+        # see the matching comment in _build_signals_tab — without an
+        # explicit sash position this pane can start almost collapsed.
+        self.root.after(80, lambda: mid.sashpos(0, 480))
 
     def _build_report_tab(self, p):
         top = ttk.Frame(p, style="TFrame"); top.pack(fill="x")
@@ -768,11 +433,10 @@ class App:
         self.console.configure(bg=c["well"], fg=c["muted"], insertbackground=c["ink"], highlightbackground=c["line"])
         self.rep_desc.configure(bg=c["well"], fg=c["ink"], insertbackground=c["ink"], highlightbackground=c["line"])
         self.sig_canvas.configure(bg=c["panel"])
-        self.flt_canvas.configure(bg=c["panel"])
-        for tv in (self.stats, self.dyn_tree, self.flt_tree, self.comp_list, self.comp_stats):
+        for tv in (self.stats, self.bus_tree):
             tv.tag_configure("odd", background=c["panel"])
             tv.tag_configure("even", background=c["stripe"])
-        for fig in (self.fig_tr, self.fig_ov, self.fig_dyn):
+        for fig in (self.fig_tr, self.fig_ov, self.fig_bus):
             fig.set_facecolor(c["panel"])
         self._redraw_all()
 
@@ -921,7 +585,6 @@ class App:
         ts = np.fromiter((f.t for f in self.frames), float, len(self.frames))
         self.log_t0 = float(ts.min()); self.log_dur = float(ts.max()) - self.log_t0
         self.trim_a = self.trim_b = None
-        self.dyn_rows = []; self._dyn_ts = None; self.fault_rows = []
         self.bus_health = None
         for r in self.bus_tree.get_children():
             self.bus_tree.delete(r)
@@ -941,13 +604,10 @@ class App:
                            "Duration": self.meta["duration"], "Frames": str(len(self.frames)),
                            "Signals": str(len(self.series_all))})
         self._build_checklist()
-        self._build_fault_checklist()
-        self._populate_components()
         names = [s["name"] for s in self.series_all]
         for i, cb in enumerate(self.ov_combos):
             cb.configure(values=["— none —"] + names)
             cb.set(names[i] if i < 2 and i < len(names) else "— none —")
-        self._autofill_roles(names)
         self._reset_trim_fields()
         self.export_btn.configure(state="normal")
         self._update_report_note()
@@ -1062,12 +722,10 @@ class App:
     def _redraw_all(self):
         if self.series_all:
             self.draw_stats(); self.draw_traces(); self.draw_overlay(keep=True)
-            self._fill_dyn_tree(self.dyn_rows) if self.dyn_rows else None
-            self._draw_dyn_plot()
             self._draw_bus_plot()
         else:
             for fig, canvas in ((self.fig_tr, self.canvas_tr), (self.fig_ov, self.canvas_ov),
-                                (self.fig_dyn, self.canvas_dyn), (self.fig_bus, self.canvas_bus)):
+                                (self.fig_bus, self.canvas_bus)):
                 fig.clear(); canvas.draw()
 
     def draw_stats(self):
@@ -1149,134 +807,6 @@ class App:
             ax0.set_ylabel("normalized 0–1")
         ax0.legend(lines, [ln.get_label() for ln in lines], fontsize=8, loc="upper right")
         fig.tight_layout(); self.canvas_ov.draw()
-
-    # ── components (per-subsystem grouping) ─────────────────────────────────
-    def _classify_all(self):
-        groups = {c: [] for c in COMPONENT_ORDER}
-        for s in self.series_all:
-            comp = classify_component(self.frame_name_by_id.get(s["msg_id"], ""), s["name"])
-            groups[comp].append(s)
-        return groups
-
-    def _populate_components(self):
-        self.comp_groups = self._classify_all()
-        for r in self.comp_list.get_children():
-            self.comp_list.delete(r)
-        first = None
-        for i, comp in enumerate(COMPONENT_ORDER):
-            n = len(self.comp_groups.get(comp, []))
-            if n == 0:
-                continue
-            iid = self.comp_list.insert("", "end", text=comp, values=(n,),
-                                        tags=("even" if i % 2 else "odd",))
-            if first is None:
-                first = iid
-        for r in self.comp_stats.get_children():
-            self.comp_stats.delete(r)
-        if first is not None:
-            self.comp_list.selection_set(first)
-            self._on_component_select()
-
-    def _on_component_select(self):
-        sel = self.comp_list.selection()
-        if not sel:
-            return
-        comp = self.comp_list.item(sel[0], "text")
-        for r in self.comp_stats.get_children():
-            self.comp_stats.delete(r)
-        i = 0
-        for s in self.comp_groups.get(comp, []):
-            t, v = self._trim_points(s)
-            if not len(v):
-                continue
-            st = core.stats(v)
-            self.comp_stats.insert("", "end", text=s["name"], tags=("even" if i % 2 else "odd",),
-                                   values=(s["unit"] or "—", st["n"], f"{st['min']:.4f}",
-                                           f"{st['max']:.4f}", f"{st['mean']:.4f}", f"{st['std']:.4f}"))
-            i += 1
-
-    def _component_export_rows(self, series_v):
-        """rows for the Components report sheet, restricted to exported signals."""
-        keep = {s["name"] for s in series_v}
-        rows = []
-        for comp in COMPONENT_ORDER:
-            for s in self.comp_groups.get(comp, []):
-                if s["name"] not in keep:
-                    continue
-                sv = next((x for x in series_v if x["name"] == s["name"]), None)
-                if sv is None or not len(sv["v"]):
-                    continue
-                st = core.stats(sv["v"])
-                rows.append((comp, s["name"], s["unit"], st["n"],
-                             round(st["min"], 4), round(st["max"], 4),
-                             round(st["mean"], 4), round(st["std"], 4)))
-        return rows
-
-    # ── vehicle dynamics ────────────────────────────────────────────────────
-    def _autofill_roles(self, names):
-        picks = guess_roles(names)
-        for rid, _, _ in ROLES:
-            self.role_combos[rid].configure(values=["— none —"] + names)
-            self.role_combos[rid].set(picks.get(rid, "— none —"))
-
-    def _role_series(self, rid):
-        name = self.role_combos[rid].get()
-        if not name or name == "— none —":
-            return None
-        s = next((x for x in self.series_all if x["name"] == name), None)
-        if s is None:
-            return None
-        t, v = self._trim_points(s)
-        if len(v) < 2:
-            return None
-        return (t, v, s["unit"])
-
-    def compute_dyn(self):
-        if not self.series_all:
-            return
-        roles = {rid: self._role_series(rid) for rid, _, _ in ROLES}
-        def _num(entry):
-            try:
-                return float(entry.get()) if entry.get().strip() else None
-            except ValueError:
-                return None
-        opts = dict(speed_unit=self.opt_speed.get(),
-                    mass=_num(self.opt_mass), payload=_num(self.opt_payload))
-        rows, raw, tsdata = compute_dynamics(roles, opts)
-        self.dyn_rows = rows; self._dyn_ts = tsdata
-        self._fill_dyn_tree(rows); self._draw_dyn_plot()
-        self.log(f"Computed {len([r for r in rows if r[1] != ''])} dynamics metric(s).")
-
-    def _fill_dyn_tree(self, rows):
-        for r in self.dyn_tree.get_children():
-            self.dyn_tree.delete(r)
-        for i, (metric, value, unit) in enumerate(rows):
-            self.dyn_tree.insert("", "end", text=metric, values=(value, unit),
-                                 tags=("even" if i % 2 else "odd",))
-
-    def _draw_dyn_plot(self):
-        fig = self.fig_dyn; fig.clear()
-        c = THEMES[self.theme]; fig.set_facecolor(c["panel"])
-        ts = self._dyn_ts
-        ax = fig.add_subplot(111); self._style_ax(ax)
-        if not ts:
-            ax.text(0.5, 0.5, "Map battery V+I (or power), then Compute",
-                    ha="center", va="center", color=c["muted"], transform=ax.transAxes)
-            self.canvas_dyn.draw(); return
-        grid, power, cum = ts
-        x = grid - self.log_t0
-        xp, pp = decimate(x, power / 1000.0)
-        ax.plot(xp, pp, color=PALETTE[0], lw=1.0)
-        ax.axhline(0, color=c["line"], lw=0.7)
-        ax.set_xlabel("t (s)"); ax.set_ylabel("Power (kW)", color=PALETTE[0])
-        ax.tick_params(axis="y", labelcolor=PALETTE[0])
-        ax2 = ax.twinx()
-        xc, cc = decimate(x, cum)
-        ax2.plot(xc, cc, color=PALETTE[1], lw=1.2)
-        ax2.set_ylabel("Cumulative energy (Wh)", color=PALETTE[1])
-        ax2.tick_params(axis="y", labelcolor=PALETTE[1], labelsize=8)
-        ax.set_title("Battery power & energy", fontsize=9, loc="left")
-        fig.tight_layout(); self.canvas_dyn.draw()
 
     # ── bus health ──────────────────────────────────────────────────────────
     def _trimmed_frames(self):
@@ -1381,70 +911,6 @@ class App:
                     fontsize=11, fontweight="bold")
         fig.tight_layout(); FigureCanvasAgg(fig).print_png(path)
 
-    # ── faults ──────────────────────────────────────────────────────────────
-    def _build_fault_checklist(self):
-        for w in self.flt_inner.winfo_children():
-            w.destroy()
-        self.fault_vars = []
-        for s in self.series_all:
-            nl = s["name"].lower()
-            guess = any(h in nl for h in FAULT_HINTS)
-            var = tk.BooleanVar(value=guess)
-            unit = f" [{s['unit']}]" if s["unit"] else ""
-            ttk.Checkbutton(self.flt_inner, text=f"{s['name']}{unit}", variable=var,
-                            style="Card.TCheckbutton").pack(anchor="w", fill="x")
-            self.fault_vars.append(var)
-
-    def _fault_all(self, on):
-        for v in self.fault_vars:
-            v.set(on)
-
-    def detect_faults_ui(self):
-        if not self.series_all:
-            return
-        items = []
-        for s, v in zip(self.series_all, self.fault_vars):
-            if v.get():
-                t, val = self._trim_points(s)
-                items.append((s["name"], t, val))
-        if not items:
-            messagebox.showwarning("CAN Signal Bench", "Tick at least one fault signal.")
-            return
-        mode = "flag" if self.flt_mode.get().startswith("value ≥") else "code"
-        try:
-            thr = float(self.flt_thr.get())
-        except ValueError:
-            thr = 0.5
-        episodes, skipped = detect_faults(items, mode, thr)
-
-        # format for table + export; keep absolute times for clock rendering
-        self.fault_rows = []
-        for name, code, sa, ea in episodes:
-            self.fault_rows.append((
-                name, code,
-                core._sec_to_clock(sa), core._sec_to_clock(ea),
-                f"{ea - sa:.3f}", f"{sa - self.log_t0:.3f}", f"{ea - self.log_t0:.3f}"))
-        self._fill_fault_tree()
-        total = len(self.fault_rows)
-        active = sum(float(r[4]) for r in self.fault_rows)
-        note = (f"{total} episode(s) · {active:.2f} s active total"
-                if total else "No fault episodes in this window.")
-        if skipped:
-            note += f"\nSkipped {len(skipped)} non-discrete signal(s): " + ", ".join(skipped[:4])
-            if len(skipped) > 4:
-                note += " …"
-        self.flt_summary.configure(text=note)
-        self.log(f"Detected {total} fault episode(s)."
-                 + (f" Skipped {len(skipped)} continuous signal(s)." if skipped else ""))
-
-    def _fill_fault_tree(self):
-        for r in self.flt_tree.get_children():
-            self.flt_tree.delete(r)
-        for i, r in enumerate(self.fault_rows):
-            name, code, sc, ec, dur, _, _ = r
-            self.flt_tree.insert("", "end", text=name, values=(code, sc, ec, dur),
-                                 tags=("even" if i % 2 else "odd",))
-
     # ── report / export ─────────────────────────────────────────────────────
     def _update_report_note(self):
         if not self.series_all:
@@ -1473,21 +939,12 @@ class App:
         trim_a, trim_b, dur = self.trim_a, self.trim_b, self.log_dur
         frames, meta = self.frames, dict(self.meta)
         series_all = self.series_all
-        dyn_ts = self._dyn_ts
         bus_health = dict(self.bus_health) if (self.bus_health and "bus_health" in sections) else None
-        # report metadata: VIN / payload / description
+        # report metadata: VIN / description
         meta["vin"] = self.rep_vin.get().strip().upper()
-        try:
-            pl = self.opt_payload.get().strip()
-            meta["payload"] = f"{float(pl):g} kg" if pl else ""
-        except ValueError:
-            meta["payload"] = self.opt_payload.get().strip()
         meta["description"] = self.rep_desc.get("1.0", "end").strip()
         dbc_names = [os.path.basename(p) for p in self.dbc_paths]
         fname_by_id = self.frame_name_by_id
-        dyn = list(self.dyn_rows) if ("dynamics" in sections and self.dyn_rows) else None
-        flt = list(self.fault_rows) if ("faults" in sections and self.fault_rows) else None
-        want_components = "components" in sections
 
         def work():
             a = -np.inf if trim_a is None else t0 + trim_a
@@ -1508,11 +965,9 @@ class App:
             series_full = _trim_series(series_all)    # every DBC signal — Merged/Summary
             meta["trim"] = (f"{(trim_a or 0):.3f}-{(trim_b if trim_b is not None else dur):.3f} s"
                             if trimmed else "full log")
-            comp = self._component_export_rows(series_v) if want_components else None
 
             plotdir = os.path.join(os.path.dirname(path), "plots")
-            need_dyn_chart = dyn is not None and dyn_ts is not None
-            if ("charts" in sections) or need_dyn_chart:
+            if "charts" in sections:
                 os.makedirs(plotdir, exist_ok=True)
 
             plot_paths = []
@@ -1523,11 +978,6 @@ class App:
                     self._render_png(s, t0, pp, i); plot_paths.append(pp)
                     prog(0.01 + 0.03 * i / n, "Rendering charts…")
 
-            dyn_chart_path = None
-            if need_dyn_chart:
-                dyn_chart_path = os.path.join(plotdir, "_vehicle_dynamics.png")
-                self._render_dyn_png(dyn_chart_path, dyn_ts)
-
             if bus_health is not None and len(bus_health.get("bins", [])):
                 os.makedirs(plotdir, exist_ok=True)
                 bus_chart_path = os.path.join(plotdir, "_bus_health.png")
@@ -1536,14 +986,10 @@ class App:
 
             # pass only kwargs the installed core supports, so an older
             # can_log_analyzer.py degrades gracefully instead of crashing
-            kw = dict(sections=sections, dynamics=dyn, faults=flt)
+            kw = dict(sections=sections)
             params = inspect.signature(core.export_excel).parameters
-            if "components" in params:
-                kw["components"] = comp
             if "progress" in params:
                 kw["progress"] = prog
-            if "dyn_chart" in params:
-                kw["dyn_chart"] = dyn_chart_path
             if "bus_health" in params:
                 kw["bus_health"] = bus_health
             core.export_excel(path, meta, dbc_names, series_full, fv, fname_by_id,
@@ -1560,29 +1006,6 @@ class App:
         ax.set_xlabel("t (s)", fontsize=9); ax.grid(True, alpha=0.3)
         fig.tight_layout(); FigureCanvasAgg(fig).print_png(path)
 
-    def _render_dyn_png(self, path, ts):
-        """Battery power + cumulative energy chart, embedded on the Vehicle
-        Dynamics sheet — same data as the Dynamics tab's live plot."""
-        grid, power, cum = ts
-        fig = Figure(figsize=(6.8, 3.0), dpi=110)
-        ax = fig.add_subplot(111)
-        x = grid - self.log_t0
-        xp, pp = decimate(x, power / 1000.0)
-        ax.plot(xp, pp, color=PALETTE[0], lw=1.1, label="Power (kW)")
-        ax.axhline(0, color="#888888", lw=0.7)
-        ax.set_xlabel("t (s)", fontsize=9)
-        ax.set_ylabel("Power (kW)", color=PALETTE[0], fontsize=9)
-        ax.tick_params(axis="y", labelcolor=PALETTE[0])
-        ax.grid(True, alpha=0.3)
-        ax2 = ax.twinx()
-        xc, cc = decimate(x, cum)
-        ax2.plot(xc, cc, color=PALETTE[1], lw=1.3, label="Cumulative energy (Wh)")
-        ax2.set_ylabel("Cumulative energy (Wh)", color=PALETTE[1], fontsize=9)
-        ax2.tick_params(axis="y", labelcolor=PALETTE[1])
-        ax.set_title("Battery power & cumulative energy", fontsize=11, fontweight="bold")
-        lines = ax.get_lines() + ax2.get_lines()
-        ax.legend(lines, [ln.get_label() for ln in lines], fontsize=8, loc="upper left")
-        fig.tight_layout(); FigureCanvasAgg(fig).print_png(path)
 
     def _export_done(self, res):
         self.busy = False; self.export_btn.configure(state="normal")
