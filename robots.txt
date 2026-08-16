@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://devdhanoosh.github.io/CANDecode/sitemap.xml
+Sitemap: https://devdhanoosh.github.io/CANDecoder/sitemap.xml
