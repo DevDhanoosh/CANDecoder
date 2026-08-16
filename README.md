@@ -1,6 +1,6 @@
 # CANDecode
 
-**Live tool:** https://devdhanoosh.github.io/CANDecoder/
+**Live tool:** [https://devdhanoosh.github.io/CANDecode/](https://devdhanoosh.github.io/CANDecoder/)
 
 Open-source, DBC-guided CAN bus log decoder, plotter, and Excel exporter.
 
