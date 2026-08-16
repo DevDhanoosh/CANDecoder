@@ -1,0 +1,7 @@
+# PyInstaller build output — the .exe is distributed via GitHub Releases,
+# not committed (it's 70+MB and gets rebuilt from candecode.py + the .spec).
+build/
+dist/
+
+__pycache__/
+*.pyc

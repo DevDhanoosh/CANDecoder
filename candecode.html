@@ -1,0 +1,1239 @@
+<!--
+  ═══════════════════════════════════════════════════════════════════════
+  CANDecode — DBC-guided CAN bus log decoder, plotter and Excel exporter.
+  Single-file, no build step, all decoding happens locally in the browser
+  (no file is ever uploaded anywhere).
+
+  An open-source personal project. No proprietary or vendor DBC content is
+  bundled or referenced — bring your own .dbc file(s) and trace log.
+
+  Author  : Dhanoosh B
+  Contact : dhanoosh2001@gmail.com
+  GitHub  : https://github.com/DevDhanoosh
+  License : MIT (see LICENSE)
+  ═══════════════════════════════════════════════════════════════════════
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CANDecode</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
+<style>
+  :root, :root[data-theme="dark"]{
+    --bg:#0a0d10; --panel:#12171c; --well:#0d1216; --ink:#e2eaec; --muted:#93a5aa;
+    --faint:#5c6d72; --line:#232d32; --line-soft:#1a2226; --accent:#ffb020; --accent-ink:#1a1204;
+    --warn:#ff5f56; --ok:#34d399; --ok-bg:#0f2a20; --grid:#1c2529; --tick:#7c8b90;
+    --gridline:rgba(255,255,255,0.035);
+    --shadow:0 1px 2px rgba(0,0,0,0.4);
+    --sans: "Segoe UI", system-ui, -apple-system, Roboto, Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  }
+  :root[data-theme="light"]{
+    --bg:#eef0ea; --panel:#ffffff; --well:#f3f4ee; --ink:#1b2320; --muted:#5c6b62;
+    --faint:#8a978c; --line:#d9ded2; --line-soft:#e8ebe1; --accent:#b8650a; --accent-ink:#ffffff;
+    --warn:#c9392b; --ok:#1f9d57; --ok-bg:#eaf7ee; --grid:#e2e6da; --tick:#5c6b62;
+    --gridline:rgba(0,0,0,0.05);
+    --shadow:0 1px 2px rgba(20,32,20,0.05);
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0; padding:0;}
+  body{
+    background-color:var(--bg); color:var(--ink); font-family:var(--sans); font-size:13px; line-height:1.5;
+    background-image:linear-gradient(var(--gridline) 1px, transparent 1px), linear-gradient(90deg, var(--gridline) 1px, transparent 1px);
+    background-size:26px 26px; background-attachment:fixed;
+  }
+  .wrap{max-width:1220px; margin:0 auto; padding:26px 20px 60px;}
+
+  /* ── header ── */
+  .topbar{display:flex; justify-content:space-between; align-items:flex-start; gap:16px;}
+  .brand{display:flex; align-items:flex-start; gap:12px;}
+  .brand .led{margin-top:9px;}
+  .eyebrow{color:var(--accent); letter-spacing:.24em; font-size:10px; font-weight:700; text-transform:uppercase; margin-bottom:7px; font-family:var(--mono);}
+  h1{margin:0; font-size:27px; font-weight:800; letter-spacing:-0.02em; font-family:var(--mono);}
+  .subhead{color:var(--muted); font-size:12.5px; margin-top:8px; max-width:620px;}
+  .theme-switch{display:inline-flex; border:1px solid var(--line); border-radius:4px; overflow:hidden; background:var(--panel);}
+  .theme-switch button{background:transparent; border:none; color:var(--muted); cursor:pointer; font-family:var(--mono); font-size:11px; font-weight:700; padding:7px 13px;}
+  .theme-switch button+button{border-left:1px solid var(--line);}
+  .theme-switch button.active{background:var(--accent); color:var(--accent-ink);}
+
+  .rule-tech{height:1px; background:var(--line-soft); margin:18px 0 22px; position:relative;}
+  .rule-tech::before{content:''; position:absolute; top:-4px; left:0; width:52px; height:3px; background:var(--accent);}
+
+  /* ── instrument strip (LCD-style readouts) ── */
+  .instrument{display:grid; grid-template-columns:repeat(6,1fr); gap:10px; margin-bottom:20px;}
+  .instrument.h3{grid-template-columns:repeat(3,1fr);}
+  @media (max-width:820px){ .instrument{grid-template-columns:repeat(3,1fr);} }
+  @media (max-width:480px){ .instrument{grid-template-columns:repeat(2,1fr);} }
+  .itile{background:var(--well); border:1px solid var(--line); border-left:2px solid var(--accent); border-radius:3px; padding:10px 12px;}
+  .itile .ik{display:block; font-size:9px; letter-spacing:.1em; text-transform:uppercase; color:var(--faint); font-weight:700; font-family:var(--mono);}
+  .itile .iv{display:block; margin-top:5px; font-family:var(--mono); font-size:13px; font-weight:700; color:var(--ink);}
+  .itile .iv.warn{color:var(--warn);}
+  .warnbox{background:var(--warn); color:#fff; border-radius:3px; padding:10px 12px; font-size:11.5px; font-weight:600; margin-bottom:14px; line-height:1.5;}
+  :root[data-theme="light"] .warnbox{color:#fff;}
+
+  /* ── stage panels ── */
+  .stagerow{display:grid; gap:16px; margin-bottom:16px; align-items:start;}
+  .stagerow.c2{grid-template-columns:1fr 1fr;}
+  @media (max-width:900px){ .stagerow.c2{grid-template-columns:1fr;} }
+  .stage{position:relative; background:var(--panel); border:1px solid var(--line); border-radius:4px; padding:18px; box-shadow:var(--shadow); margin-bottom:16px;}
+  .stagerow .stage{margin-bottom:0;}
+  .stage::before{content:''; position:absolute; top:-1px; left:-1px; width:11px; height:11px; border-top:2px solid var(--accent); border-left:2px solid var(--accent);}
+  .stage::after{content:''; position:absolute; bottom:-1px; right:-1px; width:11px; height:11px; border-bottom:2px solid var(--accent); border-right:2px solid var(--accent);}
+  .stage-head{display:flex; align-items:center; gap:10px; margin-bottom:14px; padding-bottom:10px; border-bottom:1px solid var(--line-soft);}
+  .stage-idx{font-family:var(--mono); font-size:10px; font-weight:800; color:var(--accent-ink); background:var(--accent); border-radius:3px; padding:2px 6px; letter-spacing:.05em;}
+  .stage-head h2{margin:0; font-size:11px; letter-spacing:.11em; text-transform:uppercase; color:var(--ink); font-weight:800; flex:1;}
+
+  /* ── LEDs ── */
+  .led{width:7px; height:7px; border-radius:50%; display:inline-block; background:var(--faint); margin-right:7px; vertical-align:middle;}
+  .led.ok{background:var(--ok); box-shadow:0 0 6px var(--ok);}
+
+  /* ── drop zones ── */
+  .drop{border:1px dashed var(--line); border-radius:3px; padding:12px; background:var(--well); cursor:pointer; display:flex; align-items:center; justify-content:space-between; gap:8px;}
+  .drop:hover{border-color:var(--accent);}
+  .drop.filled{border-color:var(--ok); border-style:solid; background:var(--ok-bg);}
+  .drop input{display:none;}
+  .drop .led{background:var(--faint);}
+  .drop.filled .led{background:var(--ok); box-shadow:0 0 6px var(--ok);}
+  .drop-label{font-size:12.5px; font-weight:600;}
+  .drop-label small{display:block; color:var(--faint); margin-top:2px; font-size:10.5px; font-weight:400; margin-left:14px;}
+  .drop .status{font-size:10.5px; color:var(--faint); font-family:var(--mono); white-space:nowrap;}
+  .drop.filled .status{color:var(--ok);}
+  .dbc-list{margin-top:8px; display:flex; flex-direction:column; gap:5px;}
+  .dbc-item{display:flex; align-items:center; gap:8px; background:var(--well); border:1px solid var(--line-soft); border-radius:3px; padding:5px 8px; font-size:11px;}
+  .dbc-item .nm{font-family:var(--mono); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1;}
+  .dbc-item .rm{border:none; background:none; color:var(--faint); cursor:pointer; font-size:14px;}
+  .dbc-item .rm:hover{color:var(--warn);}
+  .field{margin-top:12px;}
+  .field label{display:block; font-size:10px; color:var(--faint); margin-bottom:5px; text-transform:uppercase; letter-spacing:.07em; font-weight:700;}
+  .field input[type=text]{width:100%; background:var(--well); border:1px solid var(--line); color:var(--ink); padding:8px 9px; border-radius:3px; font-family:var(--mono); font-size:12px;}
+  .fieldrow{display:grid; grid-template-columns:1fr 1fr; gap:12px;}
+
+  /* ── buttons ── */
+  .btn{font-family:var(--mono); font-weight:700; letter-spacing:.04em; text-transform:uppercase; border-radius:3px; cursor:pointer; font-size:11px;}
+  .btn.primary{background:var(--accent); color:var(--accent-ink); border:1px solid var(--accent); padding:9px 16px;}
+  .btn.primary:disabled{background:var(--line); border-color:var(--line); color:var(--faint); cursor:not-allowed;}
+  .btn.block{width:100%; padding:12px; margin-top:16px; font-size:11.5px;}
+  .btn.ghost{background:var(--well); border:1px solid var(--line); color:var(--muted); padding:7px 12px; font-size:10.5px;}
+  .btn.ghost:hover{border-color:var(--accent); color:var(--accent);}
+  .btn.ghost:disabled{color:var(--faint); border-color:var(--line-soft); cursor:not-allowed;}
+
+  /* ── console ── */
+  .console{background:#050708; border:1px solid var(--line); border-radius:3px; padding:11px 12px; height:150px; overflow-y:auto; font-size:11px; color:#7fe0a8; font-family:var(--mono);}
+  :root[data-theme="light"] .console{background:#12160f; color:#8fe6ac;}
+  .console .l{white-space:pre-wrap;}
+  .console .l.err{color:#ff8b7a;} .console .l.info{color:#63c8ff;} .console .l.dim{color:#6d7f92;}
+
+  .toolbar{display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;}
+  .checklist{display:flex; flex-direction:column; gap:2px; max-height:230px; overflow-y:auto; margin-top:4px;}
+  .checkrow{display:flex; align-items:center; gap:8px; font-size:12px; padding:5px 6px; border-radius:3px;}
+  .checkrow:hover{background:var(--well);}
+  .checkrow .id{color:var(--accent); font-family:var(--mono); font-size:10.5px; font-weight:600;}
+  .checkrow .n{color:var(--faint); font-family:var(--mono); font-size:10px; margin-left:auto;}
+
+  table{width:100%; border-collapse:collapse; font-size:11.5px; font-family:var(--mono);}
+  th,td{padding:7px 10px; text-align:right; border-bottom:1px solid var(--line-soft); white-space:nowrap;}
+  th:first-child, td:first-child, th:nth-child(2), td:nth-child(2){text-align:left;}
+  th{color:var(--faint); font-weight:700; text-transform:uppercase; font-size:9px; letter-spacing:.06em; font-family:var(--sans);}
+  tbody tr:hover{background:var(--well);}
+  td.warn{color:var(--warn); font-weight:700;}
+  .tablewrap{overflow-x:auto;}
+
+  .charts{display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:6px;}
+  @media (max-width:760px){ .charts{grid-template-columns:1fr;} }
+  .chartcard{background:var(--well); border:1px solid var(--line-soft); border-radius:3px; padding:12px;}
+  .chartcard .ctitle{font-size:10.5px; color:var(--faint); margin-bottom:6px; display:flex; justify-content:space-between; gap:8px; font-family:var(--mono);}
+  .chartcard .ctitle b{color:var(--ink);}
+  .chartcard canvas{max-height:170px;}
+  .chartblock{margin-top:6px;}
+  .chartblock canvas{max-height:220px;}
+  .empty{color:var(--faint); font-size:12px; padding:22px 0; text-align:center;}
+
+  .trimbar{display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:12px; padding:10px 12px; background:var(--well); border:1px solid var(--line-soft); border-radius:3px;}
+  .trimbar .lbl{font-size:10.5px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; font-family:var(--mono);}
+  .trimbar select{background:var(--panel); border:1px solid var(--line); color:var(--ink); padding:6px 7px; border-radius:3px; font-size:11px;}
+  .trimbar input[type=text]{width:110px; background:var(--panel); border:1px solid var(--line); color:var(--ink); padding:6px 7px; border-radius:3px; font-family:var(--mono); font-size:11.5px;}
+  .trimbar .info{font-size:10.5px; color:var(--faint); font-family:var(--mono); margin-left:auto;}
+
+  footer{margin-top:28px; padding-top:16px; border-top:1px solid var(--line-soft); color:var(--faint); font-size:11px; text-align:center; line-height:1.9;}
+  footer b{color:var(--muted); font-family:var(--mono);}
+  footer a{color:var(--accent); text-decoration:none;}
+  footer a:hover{text-decoration:underline;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="topbar">
+    <div class="brand">
+      <span class="led ok" title="runs fully client-side"></span>
+      <div>
+        <div class="eyebrow">CAN BUS · DIAGNOSTIC BENCH</div>
+        <h1>CANDecode</h1>
+        <div class="subhead">Load one or more DBC databases and a CAN trace, decode every signal they agree on, plot it, check bus health, and export a tidy Excel workbook — entirely client-side, nothing leaves your browser.</div>
+      </div>
+    </div>
+    <div class="theme-switch" id="themeSwitch">
+      <button data-v="dark" class="active">◑ DARK</button>
+      <button data-v="light">◐ LIGHT</button>
+    </div>
+  </div>
+  <div class="rule-tech"></div>
+
+  <div class="instrument">
+    <div class="itile"><span class="ik">Date</span><span class="iv" id="roDate">—</span></div>
+    <div class="itile"><span class="ik">Start</span><span class="iv" id="roStart">—</span></div>
+    <div class="itile"><span class="ik">End</span><span class="iv" id="roEnd">—</span></div>
+    <div class="itile"><span class="ik">Duration</span><span class="iv" id="roDur">—</span></div>
+    <div class="itile"><span class="ik">Frames</span><span class="iv" id="roFrames">—</span></div>
+    <div class="itile"><span class="ik">Signals</span><span class="iv" id="roSignals">—</span></div>
+  </div>
+
+  <div class="stagerow c2">
+    <div class="stage">
+      <div class="stage-head"><span class="stage-idx">01</span><h2>Source Files</h2></div>
+      <label class="drop" id="dbcDrop">
+        <div class="drop-label"><span class="led"></span>DBC databases<small>up to 10 files · merged by ID</small></div>
+        <div class="status" id="dbcStatus">none selected</div>
+        <input type="file" id="dbcInput" accept=".dbc" multiple>
+      </label>
+      <div class="dbc-list" id="dbcList"></div>
+      <div style="height:10px"></div>
+      <label class="drop" id="logDrop">
+        <div class="drop-label"><span class="led"></span>CAN log trace<small>BUSMASTER (.log/.asc) or quoted CSV (.csv)</small></div>
+        <div class="status" id="logStatus">none selected</div>
+        <input type="file" id="logInput" accept=".log,.txt,.asc,.csv">
+      </label>
+      <div class="fieldrow">
+        <div class="field">
+          <label>Merge tolerance (s)</label>
+          <input type="text" id="tolInput" value="0.1">
+        </div>
+        <div class="field">
+          <label>Bus bit rate (bit/s)</label>
+          <input type="text" id="baudrateInp" value="500000">
+        </div>
+      </div>
+      <button class="btn primary block" id="runBtn" disabled>▶ Decode</button>
+    </div>
+
+    <div class="stage">
+      <div class="stage-head"><span class="stage-idx">02</span><h2>Console</h2></div>
+      <div class="console" id="console"><div class="l dim">Waiting for files…</div></div>
+    </div>
+  </div>
+
+  <div class="stage">
+    <div class="stage-head">
+      <span class="stage-idx">03</span><h2>Signals Decoded</h2>
+      <button class="btn ghost" id="downloadBtn" disabled>Export .xlsx</button>
+    </div>
+    <div class="subhead" style="margin:-6px 0 12px;">Tick the signals you want <b>charted</b>. The Excel Merged/Summary sheets always include every decoded signal, regardless of what's ticked here.</div>
+    <div class="toolbar" id="sigActions" style="display:none; margin:0 0 8px;">
+      <div style="display:flex; gap:8px;">
+        <button class="btn ghost" id="selectAllBtn">All</button>
+        <button class="btn ghost" id="deselectAllBtn">None</button>
+      </div>
+    </div>
+    <div id="checklistWrap"><div class="empty">Run a decode to see signals.</div></div>
+  </div>
+
+  <div class="stage">
+    <div class="stage-head"><span class="stage-idx">04</span><h2>Stats</h2></div>
+    <div class="tablewrap" id="statsWrap"><div class="empty">No data yet.</div></div>
+  </div>
+
+  <div class="stage">
+    <div class="stage-head"><span class="stage-idx">05</span><h2>Bus Health</h2></div>
+    <div class="subhead" style="margin:-6px 0 14px;">Per-ID timing is computed directly from frame timestamps, so it's exact. Bus load % is an <b>estimate</b> (see README). Error-frame sub-types are only as good as what your logging tool recorded.</div>
+    <div id="healthWarnings"></div>
+    <div class="instrument h3" id="healthTiles"></div>
+    <div class="chartblock" id="busLoadBlock" style="display:none;">
+      <canvas id="busLoadCanvas"></canvas>
+    </div>
+    <div class="tablewrap">
+      <div class="subhead" style="margin:14px 0 4px; font-weight:700; color:var(--muted); text-transform:uppercase; font-size:10px; letter-spacing:.06em;">Per-message-ID timing</div>
+      <div id="perIdWrap"><div class="empty">Run a decode to see bus health.</div></div>
+    </div>
+    <div class="tablewrap" id="errorTypesWrap" style="display:none;">
+      <div class="subhead" style="margin:14px 0 4px; font-weight:700; color:var(--muted); text-transform:uppercase; font-size:10px; letter-spacing:.06em;">Error frame types</div>
+      <div id="errorTypesTable"></div>
+    </div>
+  </div>
+
+  <div class="stage">
+    <div class="stage-head"><span class="stage-idx">06</span><h2>Charts</h2></div>
+    <div class="trimbar" id="trimBar" style="display:none">
+      <span class="lbl">Trim</span>
+      <select id="trimMode"><option value="clock">Clock time</option><option value="sec">Seconds</option></select>
+      <input type="text" id="trimStartInp" placeholder="start">
+      <span>–</span>
+      <input type="text" id="trimEndInp" placeholder="end">
+      <button class="btn ghost" id="trimApply">Apply</button>
+      <button class="btn ghost" id="trimReset">Reset</button>
+      <span class="info" id="trimInfo"></span>
+    </div>
+    <div id="chartsWrap" class="charts"></div>
+  </div>
+
+  <footer>
+    <b>CANDecode</b> · open source, MIT licensed<br>
+    Dhanoosh B ·
+    <a href="https://github.com/DevDhanoosh" target="_blank" rel="noopener">github.com/DevDhanoosh</a> ·
+    <a href="mailto:dhanoosh2001@gmail.com">dhanoosh2001@gmail.com</a>
+  </footer>
+</div>
+
+<script>
+(function(){
+  const $ = id => document.getElementById(id);
+  const dbcInput = $('dbcInput'), logInput = $('logInput');
+  const dbcDrop = $('dbcDrop'), logDrop = $('logDrop');
+  const dbcStatus = $('dbcStatus'), logStatus = $('logStatus');
+  const dbcList = $('dbcList');
+  const runBtn = $('runBtn'), downloadBtn = $('downloadBtn');
+  const consoleEl = $('console');
+  const checklistWrap = $('checklistWrap'), sigActions = $('sigActions');
+  const selectAllBtn = $('selectAllBtn'), deselectAllBtn = $('deselectAllBtn');
+  const statsWrap = $('statsWrap'), chartsWrap = $('chartsWrap');
+  const tolInput = $('tolInput'), baudrateInp = $('baudrateInp');
+  const trimBar = $('trimBar'), trimStartInp = $('trimStartInp'), trimEndInp = $('trimEndInp');
+  const trimApply = $('trimApply'), trimReset = $('trimReset'), trimInfo = $('trimInfo'), trimMode = $('trimMode');
+  const roDate = $('roDate'), roStart = $('roStart'), roEnd = $('roEnd'), roDur = $('roDur'), roFrames = $('roFrames'), roSignals = $('roSignals');
+  const healthWarnings = $('healthWarnings');
+  const healthTiles = $('healthTiles'), perIdWrap = $('perIdWrap');
+  const busLoadBlock = $('busLoadBlock'), busLoadCanvas = $('busLoadCanvas');
+  const errorTypesWrap = $('errorTypesWrap'), errorTypesTable = $('errorTypesTable');
+
+  const MAX_DBC = 10;
+  const palette = ['#e8951f','#22b3d4','#d24bbd','#3bb866','#5b8def','#e2564b'];
+  const STUFF_FACTOR = 1.1;
+  function themeColors(){
+    const cs = getComputedStyle(document.documentElement);
+    return { grid: cs.getPropertyValue('--grid').trim() || '#223042',
+             tick: cs.getPropertyValue('--tick').trim() || '#7f8ea3' };
+  }
+
+  let dbcFiles = [];
+  let logText = null, logFileName = 'can_log';
+  let messages = [];
+  let currentMatched = [];   // every decoded signal: [{name, unit, msgId, points:[{t,v}]}]
+  let allFrames = [];
+  let allErrors = [];        // [{t, kind, raw}]
+  let frameNameById = {};
+  let logMeta = null;
+  let charts = [];
+  let healthCharts = [];
+  let logT0 = 0, logDur = 0;
+  let trimStart = null, trimEnd = null;
+  let dbcBaudrate = null, dbcBaudrateConflict = false;
+
+  // ── small helpers ────────────────────────────────────────
+  const pad2 = n => String(n).padStart(2,'0');
+  function secondsToClock(t){
+    t = ((t % 86400) + 86400) % 86400;
+    const h = Math.floor(t/3600), m = Math.floor((t%3600)/60), s = Math.floor(t%60);
+    const ms = Math.round((t - Math.floor(t)) * 1000);
+    return `${pad2(h)}:${pad2(m)}:${pad2(s)}.${String(ms).padStart(3,'0')}`;
+  }
+  function formatSpan(sec){
+    const h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60), s = sec%60;
+    return `${sec.toFixed(3)} s · ${pad2(h)}:${pad2(m)}:${s.toFixed(3).padStart(6,'0')}`;
+  }
+  function escHtml(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+  function log(msg, cls){
+    const d = document.createElement('div');
+    d.className = 'l' + (cls ? ' '+cls : '');
+    d.textContent = msg;
+    consoleEl.appendChild(d);
+    consoleEl.scrollTop = consoleEl.scrollHeight;
+  }
+  function clearLog(){ consoleEl.innerHTML = ''; }
+  function refreshReadyState(){ runBtn.disabled = !(dbcFiles.length && logText); }
+  function thin(points, maxN){
+    if(points.length <= maxN) return points;
+    const step = Math.ceil(points.length / maxN);
+    const out = [];
+    for(let i=0;i<points.length;i+=step) out.push(points[i]);
+    return out;
+  }
+
+  // ── file inputs ──────────────────────────────────────────
+  function readFile(file){
+    return new Promise((res, rej)=>{
+      const r = new FileReader();
+      r.onload = ()=> res(r.result);
+      r.onerror = ()=> rej(new Error('read failed: '+file.name));
+      r.readAsText(file);
+    });
+  }
+  function paintDatabaseList(){
+    dbcList.innerHTML = '';
+    dbcFiles.forEach((f, idx)=>{
+      const row = document.createElement('div');
+      row.className = 'dbc-item';
+      row.innerHTML = `<span class="nm" title="${escHtml(f.name)}">${escHtml(f.name)}</span><button class="rm" data-idx="${idx}">×</button>`;
+      dbcList.appendChild(row);
+    });
+    dbcList.querySelectorAll('.rm').forEach(b=>{
+      b.addEventListener('click', ()=>{ dbcFiles.splice(parseInt(b.dataset.idx,10),1); refreshDatabaseUI(); });
+    });
+  }
+  function refreshDatabaseUI(){
+    if(dbcFiles.length){
+      dbcStatus.textContent = dbcFiles.length === 1 ? '1 file' : `${dbcFiles.length} files`;
+      dbcDrop.classList.add('filled');
+    } else {
+      dbcStatus.textContent = 'none selected';
+      dbcDrop.classList.remove('filled');
+    }
+    paintDatabaseList();
+    refreshReadyState();
+  }
+  dbcInput.addEventListener('change', async e=>{
+    const picked = Array.from(e.target.files || []);
+    for(const f of picked){
+      if(dbcFiles.length >= MAX_DBC){ log(`DBC limit reached (${MAX_DBC}). "${f.name}" skipped.`, 'err'); break; }
+      if(dbcFiles.some(d=>d.name === f.name)) continue;
+      try{ dbcFiles.push({ name:f.name, text: await readFile(f) }); } catch(err){ log(err.message, 'err'); }
+    }
+    dbcInput.value = '';
+    refreshDatabaseUI();
+  });
+  logInput.addEventListener('change', async e=>{
+    const f = e.target.files[0];
+    if(!f) return;
+    try{
+      logText = await readFile(f);
+      logStatus.textContent = f.name;
+      logFileName = f.name.replace(/\.[^.]+$/, '');
+      logDrop.classList.add('filled');
+      refreshReadyState();
+    }catch(err){ log(err.message, 'err'); }
+  });
+
+  // ── DBC parsing ─────────────────────────────────────────
+  function loadMessageDefinitions(text){
+    const lines = text.split(/\r?\n/);
+    const msgs = []; let current = null;
+    const boRe = /^BO_\s+(\d+)\s+(\w+)\s*:\s*(\d+)\s+(\S+)/;
+    const sgRe = /^\s*SG_\s+(\w+)\s*:\s*(\d+)\|(\d+)@(\d)([+-])\s*\(([^,]+),([^)]+)\)\s*\[([^|]*)\|([^\]]*)\]\s*"([^"]*)"/;
+    for(const raw of lines){
+      let m = boRe.exec(raw);
+      if(m){
+        let id = parseInt(m[1],10), extended = false;
+        if(id >= 0x80000000){ id -= 0x80000000; extended = true; }
+        current = { id, name:m[2], dlc:parseInt(m[3],10), signals:[], extended };
+        msgs.push(current);
+        continue;
+      }
+      m = sgRe.exec(raw);
+      if(m && current){
+        current.signals.push({
+          name:m[1], startBit:parseInt(m[2],10), length:parseInt(m[3],10),
+          littleEndian:m[4] === '1', signed:m[5] === '-',
+          scale:parseFloat(m[6]), offset:parseFloat(m[7]), unit:m[10]
+        });
+      }
+    }
+    return msgs;
+  }
+
+  // Vector DBC BS_: record, when present, declares the bus speed in kbit/s
+  // (e.g. 'BS_: 500' -> 500000 bit/s). Most modern DBC exports leave this
+  // blank — returns null when there's nothing to read.
+  function readDeclaredBusSpeed(text){
+    const m = /^BS_\s*:\s*(\d+)/m.exec(text);
+    return m ? parseFloat(m[1]) * 1000 : null;
+  }
+  function declaredBusSpeed(dbcFileList){
+    const found = dbcFileList.map(f=>readDeclaredBusSpeed(f.text)).filter(v=>v !== null);
+    if(!found.length) return { baudrate:null, conflicting:false };
+    return { baudrate: found[0], conflicting: new Set(found).size > 1 };
+  }
+
+  // ── error-frame recognition (best-effort — see README) ───
+  const ERROR_KEYWORDS = [['stuff','Stuff Error'],['form','Form Error'],['crc','CRC Error'],
+                          ['ack','ACK Error'],['bit','Bit Error'],['overload','Overload Frame']];
+  function labelErrorFrame(text){
+    const low = text.toLowerCase();
+    for(const [kw,label] of ERROR_KEYWORDS){ if(low.includes(kw)) return label; }
+    return 'Error Frame (type not logged)';
+  }
+
+  // ── LOG parsing (BUSMASTER + generic quoted CSV) ─────────
+  const TRACE_LINE_RE = /^(\d{2}):(\d{2}):(\d{2}):(\d{4})\s+(?:Rx|Tx)\s+\d+\s+0x([0-9A-Fa-f]+)\s+([sx])\s+(\d+)((?:\s+[0-9A-Fa-f]{2})*)/;
+  const TS_RE = /^(\d{2}):(\d{2}):(\d{2}):(\d{4})\s+(.*)$/;
+  function sniffTraceFormat(text){
+    const head = text.slice(0, 3000);
+    if(/"Identifier \(hex\)"/i.test(head)) return 'csv';
+    if(/\bBUSMASTER\b/i.test(head) || TRACE_LINE_RE.test(head.split(/\r?\n/).find(l=>l.trim()) || '')) return 'busmaster';
+    return /^\s*"[^"]*"\s*,\s*"[0-9A-Fa-f]+"/m.test(head) ? 'csv' : 'busmaster';
+  }
+  function ingestTraceLog(text){
+    const lines = text.split(/\r?\n/); const frames = []; const errors = [];
+    let std = 0, ext = 0, malformed = 0;
+    for(const raw of lines){
+      const line = raw.trim();
+      if(!line || line.startsWith('***')) continue;
+      const m = TRACE_LINE_RE.exec(line);
+      if(!m){
+        const tm = TS_RE.exec(line);
+        if(!tm) continue;
+        const [, hh, mm, ss, frac, rest] = tm;
+        if(/error/i.test(rest)){
+          const t = parseInt(hh,10)*3600 + parseInt(mm,10)*60 + parseInt(ss,10) + parseInt(frac,10)/10000;
+          errors.push({ t, kind: labelErrorFrame(rest), raw: line.slice(0,120) });
+        } else malformed++;
+        continue;
+      }
+      const [, hh, mm, ss, frac, idHex, type, dlcStr, byteStr] = m;
+      const t = parseInt(hh,10)*3600 + parseInt(mm,10)*60 + parseInt(ss,10) + parseInt(frac,10)/10000;
+      const id = parseInt(idHex,16), dlc = parseInt(dlcStr,10);
+      const bytes = byteStr.trim().length ? byteStr.trim().split(/\s+/).map(b=>parseInt(b,16)) : [];
+      if(bytes.length < dlc){ malformed++; continue; }
+      const extended = type === 'x';
+      if(extended) ext++; else std++;
+      frames.push({ t, id, dlc, bytes: bytes.slice(0,dlc), extended });
+    }
+    return { frames, counts:{ std, ext, malformed }, errors };
+  }
+  function splitQuotedRow(line){
+    const out = []; let cur = '', inQ = false;
+    for(let i=0;i<line.length;i++){
+      const c = line[i];
+      if(inQ){ if(c === '"'){ if(line[i+1] === '"'){ cur += '"'; i++; } else inQ = false; } else cur += c; }
+      else if(c === '"'){ inQ = true; }
+      else if(c === ','){ out.push(cur); cur = ''; }
+      else cur += c;
+    }
+    out.push(cur);
+    return out;
+  }
+  function ingestQuotedCsv(text){
+    const lines = text.split(/\r?\n/); const frames = []; const errors = [];
+    let std = 0, ext = 0, malformed = 0, started = false;
+    const timeRe = /^\s*(\d{1,2}):(\d{2}):(\d{2})[.:](\d{1,6})\s*$/;
+    for(const raw of lines){
+      const line = raw.trim();
+      if(!line) continue;
+      if(!started){ if(/^"?\s*Time\s*"?\s*,/i.test(line)) started = true; continue; }
+      const f = splitQuotedRow(line);
+      if(f.length < 5){ malformed++; continue; }
+      const tm = timeRe.exec(f[0]);
+      if(!tm){ malformed++; continue; }
+      const frac = tm[4];
+      const t = (+tm[1])*3600 + (+tm[2])*60 + (+tm[3]) + parseInt(frac,10)/Math.pow(10, frac.length);
+      const rowText = f.join(',');
+      if(/\berr/i.test(rowText)){
+        errors.push({ t, kind: labelErrorFrame(rowText), raw: line.slice(0,120) });
+        continue;
+      }
+      const id = parseInt(f[1].trim(), 16);
+      if(!isFinite(id)){ malformed++; continue; }
+      const dataStr = f[4].trim();
+      const bytes = dataStr.length ? dataStr.split(/\s+/).map(b=>parseInt(b,16)) : [];
+      const extended = /ext/i.test(f[2]);
+      if(extended) ext++; else std++;
+      frames.push({ t, id, dlc: bytes.length, bytes, extended });
+    }
+    return { frames, counts:{ std, ext, malformed }, errors };
+  }
+  function spanOfFrames(frames){
+    if(!frames.length) return 0;
+    let first = frames[0].t, last = frames[0].t;
+    for(const f of frames){ if(f.t < first) first = f.t; if(f.t > last) last = f.t; }
+    let dur = last - first;
+    if(dur < 0) dur += 86400;
+    return dur;
+  }
+  // Format a date unambiguously as "DD Mon YYYY", disambiguating day/month by
+  // the >12 rule and falling back to the source convention (dmy / mdy).
+  const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  function normalizeDate(raw, hint){
+    const parts = raw.split(/[^0-9]+/).filter(Boolean);
+    if(parts.length < 3) return raw;
+    let yi = parts.findIndex(x=>x.length === 4);
+    if(yi < 0) yi = 2;
+    const year = parts[yi];
+    const two = parts.filter((_,i)=>i !== yi).map(Number).slice(0,2);
+    let d, mo;
+    if(two[0] > 12 && two[1] <= 12){ d = two[0]; mo = two[1]; }
+    else if(two[1] > 12 && two[0] <= 12){ mo = two[0]; d = two[1]; }
+    else if(hint === 'mdy'){ mo = two[0]; d = two[1]; }
+    else { d = two[0]; mo = two[1]; }              // dmy default
+    const mon = MONTHS[Math.max(0, Math.min(11, mo-1))];
+    return `${String(d).padStart(2,'0')} ${mon} ${year}`;
+  }
+  function openTrace(text){
+    const fmt = sniffTraceFormat(text);
+    const parsed = fmt === 'csv' ? ingestQuotedCsv(text) : ingestTraceLog(text);
+    const frames = parsed.frames;
+    const meta = { format: fmt === 'csv' ? 'Quoted CSV trace' : 'BUSMASTER', date:'—', start:'—', end:'—', duration:'—', durSec:0, frames:frames.length };
+    if(fmt === 'csv'){
+      const d = /^\s*Date:\s*([0-9]{1,4}[\/\-.][0-9]{1,2}[\/\-.][0-9]{1,4})/im.exec(text);
+      if(d) meta.date = normalizeDate(d[1], 'mdy');
+    } else {
+      const d = /START DATE(?:\s+AND\s+TIME)?\s*[:\-]?\s*([0-9]{1,2}[:\-\/][0-9]{1,2}[:\-\/][0-9]{2,4})/i.exec(text);
+      if(d) meta.date = normalizeDate(d[1], 'dmy');
+    }
+    if(frames.length){
+      let first = frames[0].t, last = frames[0].t;
+      for(const f of frames){ if(f.t < first) first = f.t; if(f.t > last) last = f.t; }
+      meta.start = secondsToClock(first); meta.end = secondsToClock(last);
+      meta.durSec = spanOfFrames(frames);
+      meta.duration = formatSpan(meta.durSec);
+    }
+    return { fmt, frames, counts: parsed.counts, errors: parsed.errors, meta };
+  }
+
+  // ── signal decode (Intel + Motorola, 2's-complement) ─────
+  function extractSignalValue(bytes, sig){
+    const len = sig.length;
+    let raw = 0n;
+    if(sig.littleEndian){
+      for(let i=0;i<len;i++){
+        const N = sig.startBit + i, byteIdx = N >> 3, bitIdx = N & 7;
+        if(byteIdx >= bytes.length) return null;
+        raw |= BigInt((bytes[byteIdx] >> bitIdx) & 1) << BigInt(i);
+      }
+    } else {
+      let bitPos = sig.startBit;
+      for(let i=0;i<len;i++){
+        const byteIdx = bitPos >> 3, bitInByte = bitPos & 7;
+        if(byteIdx >= bytes.length) return null;
+        raw |= BigInt((bytes[byteIdx] >> bitInByte) & 1) << BigInt(len - 1 - i);
+        bitPos = (bitInByte === 0) ? bitPos + 15 : bitPos - 1;
+      }
+    }
+    if(sig.signed && (raw & (1n << BigInt(len - 1)))) raw -= (1n << BigInt(len));
+    return Number(raw) * sig.scale + sig.offset;
+  }
+  function buildSignalSeries(frames, messages){
+    const frameIds = new Set(frames.map(f=>f.id));
+    const matchedMsgs = messages.filter(m=>frameIds.has(m.id));
+    const buckets = new Map();
+    frames.forEach((f,i)=>{ if(!buckets.has(f.id)) buckets.set(f.id,[]); buckets.get(f.id).push(f); });
+    const series = [];
+    for(const msg of matchedMsgs){
+      const fr = (buckets.get(msg.id) || []).slice().sort((a,b)=>a.t-b.t);
+      if(!fr.length) continue;
+      for(const sig of msg.signals){
+        const points = [];
+        for(const f of fr){
+          const v = extractSignalValue(f.bytes, sig);
+          if(v !== null) points.push({ t:f.t, v });
+        }
+        if(points.length) series.push({ name:sig.name, unit:sig.unit, msgId:msg.id, points });
+      }
+    }
+    return { series, matchedMsgs };
+  }
+
+  function summarizeSeries(pts){
+    const vals = pts.map(p=>p.v);
+    const n = vals.length;
+    const mean = vals.reduce((a,b)=>a+b,0)/n;
+    const variance = vals.reduce((a,b)=>a+(b-mean)*(b-mean),0)/n;
+    return { n, min: Math.min(...vals), max: Math.max(...vals), mean, std: Math.sqrt(variance) };
+  }
+  function windowPoints(points){
+    if(trimStart == null && trimEnd == null) return points;
+    const a = trimStart == null ? -Infinity : logT0 + trimStart;
+    const b = trimEnd == null ? Infinity : logT0 + trimEnd;
+    return points.filter(p=> p.t >= a && p.t <= b);
+  }
+  function windowFrames(frames){
+    if(trimStart == null && trimEnd == null) return frames;
+    const a = trimStart == null ? -Infinity : logT0 + trimStart;
+    const b = trimEnd == null ? Infinity : logT0 + trimEnd;
+    return frames.filter(f=> f.t >= a && f.t <= b);
+  }
+  function windowErrors(errs){
+    if(trimStart == null && trimEnd == null) return errs;
+    const a = trimStart == null ? -Infinity : logT0 + trimStart;
+    const b = trimEnd == null ? Infinity : logT0 + trimEnd;
+    return errs.filter(e=> e.t >= a && e.t <= b);
+  }
+  // merge-as-of, nearest timestamp within tolerance
+  function nearestJoin(times, pts, tol){
+    const out = new Array(times.length).fill('');
+    if(!pts.length) return out;
+    let j = 0;
+    for(let i=0;i<times.length;i++){
+      const t = times[i];
+      while(j < pts.length - 1 && Math.abs(pts[j+1].t - t) <= Math.abs(pts[j].t - t)) j++;
+      out[i] = Math.abs(pts[j].t - t) <= tol ? +pts[j].v.toFixed(4) : '';
+    }
+    return out;
+  }
+
+  // ═════════════════════════════════════════════════════════
+  //  Bus load & health (mirrors the Python analyze_bus_health)
+  // ═════════════════════════════════════════════════════════
+  function evaluateBusHealth(frames, durSec, baudrate, stuffFactor){
+    if(!frames.length || durSec <= 0) return { perId:[], bins:[], load:[], loadAvg:0, loadPeak:0 };
+    let t0 = frames[0].t;
+    for(const f of frames) if(f.t < t0) t0 = f.t;
+
+    const byId = new Map();
+    for(const f of frames){ if(!byId.has(f.id)) byId.set(f.id, []); byId.get(f.id).push(f.t); }
+    const perId = [];
+    byId.forEach((times, cid)=>{
+      times = times.slice().sort((a,b)=>a-b);
+      const n = times.length;
+      const gaps = [];
+      for(let i=1;i<n;i++) gaps.push((times[i]-times[i-1]) * 1000);
+      let dropout = false;
+      if(gaps.length >= 4){
+        const sorted = gaps.slice().sort((a,b)=>a-b);
+        const med = sorted[Math.floor(sorted.length/2)];
+        if(med > 0 && Math.max(...gaps) > 3 * med) dropout = true;
+      }
+      const mean = gaps.length ? gaps.reduce((a,b)=>a+b,0)/gaps.length : 0;
+      const variance = gaps.length ? gaps.reduce((a,b)=>a+(b-mean)*(b-mean),0)/gaps.length : 0;
+      perId.push({
+        id: cid, name: frameNameById[cid] || '', count: n, hz: n/durSec,
+        avgGapMs: mean, stdGapMs: Math.sqrt(variance),
+        maxGapMs: gaps.length ? Math.max(...gaps) : 0, dropout,
+      });
+    });
+    perId.sort((a,b)=> b.count - a.count);
+
+    const windowSec = 1.0;
+    const nBins = Math.max(1, Math.ceil(durSec / windowSec));
+    const binBits = new Array(nBins).fill(0);
+    for(const f of frames){
+      const base = f.extended ? 65 : 47;
+      const bits = (base + 8*f.dlc) * stuffFactor;
+      let idx = Math.floor((f.t - t0) / windowSec);
+      if(idx < 0) idx = 0; if(idx > nBins-1) idx = nBins-1;
+      binBits[idx] += bits;
+    }
+    const load = binBits.map(b => b / (windowSec * baudrate) * 100);
+    const bins = Array.from({length:nBins}, (_,i)=> i*windowSec);
+    const loadAvg = load.reduce((a,b)=>a+b,0) / load.length;
+    const loadPeak = Math.max(...load);
+    return { perId, bins, load, loadAvg, loadPeak };
+  }
+
+  function paintBusHealth(){
+    const durSec = (trimEnd ?? logDur) - (trimStart ?? 0);
+    const baudrate = parseFloat(baudrateInp.value) || 500000;
+    const fr = windowFrames(allFrames);
+    const errs = windowErrors(allErrors);
+    const health = evaluateBusHealth(fr, durSec, baudrate, STUFF_FACTOR);
+    window.__lastHealth = health; window.__lastErrors = errs; window.__lastBaudrate = baudrate;
+
+    const warnings = [];
+    if(dbcBaudrate && Math.abs(baudrate - dbcBaudrate) > Math.max(1, 0.01 * dbcBaudrate)){
+      warnings.push(`DBC declares ${(dbcBaudrate/1000).toFixed(0)} kbit/s (BS_:) but this analysis is `+
+        `using ${(baudrate/1000).toFixed(0)} kbit/s — bus-load numbers below assume the wrong speed unless that's intentional.`);
+    }
+    const overload = health.loadPeak > 100;
+    if(overload){
+      warnings.push(`Estimated peak bus load is ${health.loadPeak.toFixed(0)}%, which is impossible on a real `+
+        `bus — the assumed baud rate (${(baudrate/1000).toFixed(0)} kbit/s) is very likely too low for this `+
+        `trace. Try the next standard speed up (e.g. 250000, 500000, 1000000).`);
+    }
+    window.__lastDbcBaudrate = dbcBaudrate;
+    healthWarnings.innerHTML = warnings.map(w=>`<div class="warnbox">⚠ ${escHtml(w)}</div>`).join('');
+
+    healthTiles.innerHTML = `
+      <div class="itile"><span class="ik">Avg bus load (est.)</span><span class="iv">${health.loadAvg.toFixed(2)}%</span></div>
+      <div class="itile"><span class="ik">Peak bus load (est.)</span><span class="iv${overload?' warn':''}">${health.loadPeak.toFixed(2)}%</span></div>
+      <div class="itile"><span class="ik">Error frames</span><span class="iv${errs.length?' warn':''}">${errs.length}</span></div>`;
+
+    healthCharts.forEach(c=>c.destroy()); healthCharts = [];
+    if(health.bins.length){
+      busLoadBlock.style.display = '';
+      const tc = themeColors();
+      const chart = new Chart(busLoadCanvas, {
+        type:'line',
+        data:{ datasets:[{ data: health.bins.map((t,i)=>({x:t,y:health.load[i]})), borderColor:'#d9483b', backgroundColor:'#d9483b1f', fill:true, pointRadius:0, borderWidth:1.4, tension:0.15 }] },
+        options:{ responsive:true, maintainAspectRatio:false, animation:false, parsing:false,
+          plugins:{ legend:{ display:false } },
+          scales:{ x:{ type:'linear', title:{display:true,text:'t (s)', color:tc.tick, font:{size:9}}, grid:{color:tc.grid}, ticks:{color:tc.tick, font:{size:9}} },
+                    y:{ title:{display:true,text:'load %', color:tc.tick, font:{size:9}}, grid:{color:tc.grid}, ticks:{color:tc.tick, font:{size:9}} } } }
+      });
+      healthCharts.push(chart);
+    } else {
+      busLoadBlock.style.display = 'none';
+    }
+
+    if(health.perId.length){
+      const tbl = document.createElement('table');
+      tbl.innerHTML = '<thead><tr><th>ID</th><th>Message</th><th>Count</th><th>Hz</th><th>Avg gap (ms)</th><th>Max gap (ms)</th><th>Dropout?</th></tr></thead>';
+      const tbody = document.createElement('tbody');
+      health.perId.forEach(r=>{
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>0x${r.id.toString(16).toUpperCase()}</td><td>${escHtml(r.name)}</td><td>${r.count}</td>
+          <td>${r.hz.toFixed(2)}</td><td>${r.avgGapMs.toFixed(1)}</td><td>${r.maxGapMs.toFixed(1)}</td>
+          <td class="${r.dropout?'warn':''}">${r.dropout?'YES':'—'}</td>`;
+        tbody.appendChild(tr);
+      });
+      tbl.appendChild(tbody);
+      perIdWrap.innerHTML = ''; perIdWrap.appendChild(tbl);
+    } else {
+      perIdWrap.innerHTML = '<div class="empty">No frames in this window.</div>';
+    }
+
+    if(errs.length){
+      const counts = {};
+      errs.forEach(e=> counts[e.kind] = (counts[e.kind]||0) + 1);
+      errorTypesWrap.style.display = '';
+      const tbl = document.createElement('table');
+      tbl.innerHTML = '<thead><tr><th>Type</th><th>Count</th></tr></thead>';
+      const tbody = document.createElement('tbody');
+      Object.entries(counts).sort((a,b)=>b[1]-a[1]).forEach(([kind,n])=>{
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${escHtml(kind)}</td><td>${n}</td>`;
+        tbody.appendChild(tr);
+      });
+      tbl.appendChild(tbody);
+      errorTypesTable.innerHTML = ''; errorTypesTable.appendChild(tbl);
+    } else {
+      errorTypesWrap.style.display = 'none';
+    }
+  }
+
+  // ── checklist ────────────────────────────────────────────
+  function paintSignalChecklist(matched){
+    currentMatched = matched;
+    checklistWrap.innerHTML = '';
+    if(matched.length === 0){
+      checklistWrap.innerHTML = '<div class="empty">No DBC message IDs matched the log.</div>';
+      sigActions.style.display = 'none';
+      return;
+    }
+    sigActions.style.display = '';
+    const list = document.createElement('div');
+    list.className = 'checklist';
+    matched.forEach(sig=>{
+      const row = document.createElement('label');
+      row.className = 'checkrow';
+      const idHex = '0x'+sig.msgId.toString(16).toUpperCase().padStart(3,'0');
+      row.innerHTML = `<input type="checkbox" checked data-sig="${escHtml(sig.name)}">
+        <span class="id">${idHex}</span><span class="name">${escHtml(sig.name)}</span>
+        <span class="n">${sig.points.length} pts</span>`;
+      list.appendChild(row);
+    });
+    checklistWrap.appendChild(list);
+    list.querySelectorAll('input[type=checkbox]').forEach(cb=>{
+      cb.addEventListener('change', ()=> paintSelection(matched));
+    });
+  }
+  function setAllChecked(checked){
+    checklistWrap.querySelectorAll('input[type=checkbox]').forEach(cb=> cb.checked = checked);
+    paintSelection(currentMatched);
+  }
+  selectAllBtn.addEventListener('click', ()=> setAllChecked(true));
+  deselectAllBtn.addEventListener('click', ()=> setAllChecked(false));
+  function activeSignals(matched){
+    const active = new Set();
+    checklistWrap.querySelectorAll('input[type=checkbox]').forEach(b=>{ if(b.checked) active.add(b.dataset.sig); });
+    return matched.filter(s=>active.has(s.name));
+  }
+
+  // ── trim ──────────────────────────────────────────────────
+  function parseClockToSec(str){
+    const parts = str.split(':').map(x=>parseFloat(x));
+    if(!parts.length || parts.some(isNaN)) return NaN;
+    if(parts.length === 3) return parts[0]*3600 + parts[1]*60 + parts[2];
+    if(parts.length === 2) return parts[0]*60 + parts[1];
+    return parts[0];
+  }
+  function inputToRel(str){
+    str = (str||'').trim();
+    if(!str) return null;
+    if(trimMode.value === 'clock' || str.includes(':')){
+      const abs = parseClockToSec(str);
+      return isNaN(abs) ? NaN : abs - logT0;
+    }
+    const v = parseFloat(str);
+    return isNaN(v) ? NaN : v;
+  }
+  const clamp = v => Math.max(0, Math.min(logDur, v));
+  function updateTrimInfo(){
+    if(trimStart == null && trimEnd == null){
+      trimInfo.textContent = logDur ? `full log · ${logDur.toFixed(1)} s` : '';
+    } else {
+      const a = trimStart ?? 0, b = trimEnd ?? logDur;
+      trimInfo.textContent = `${secondsToClock(logT0+a)} – ${secondsToClock(logT0+b)}  ·  ${(b-a).toFixed(2)} s`;
+    }
+  }
+  function applyTrim(){
+    let a = inputToRel(trimStartInp.value), b = inputToRel(trimEndInp.value);
+    if(a !== null && isNaN(a)){ log('Could not read the trim start value.', 'err'); return; }
+    if(b !== null && isNaN(b)){ log('Could not read the trim end value.', 'err'); return; }
+    a = a == null ? 0 : clamp(a);
+    b = b == null ? logDur : clamp(b);
+    if(b <= a){ log('Trim end must be after start.', 'err'); return; }
+    trimStart = (a <= 0.0001) ? null : a;
+    trimEnd = (b >= logDur - 0.0001) ? null : b;
+    updateTrimInfo();
+    paintSelection(currentMatched);
+    paintBusHealth();
+  }
+  trimApply.addEventListener('click', applyTrim);
+  [trimStartInp, trimEndInp].forEach(el=> el.addEventListener('keydown', e=>{ if(e.key==='Enter') applyTrim(); }));
+  trimReset.addEventListener('click', ()=>{
+    trimStart = null; trimEnd = null;
+    trimStartInp.value = ''; trimEndInp.value = '';
+    updateTrimInfo();
+    paintSelection(currentMatched);
+    paintBusHealth();
+  });
+  baudrateInp.addEventListener('change', ()=>{ if(allFrames.length) paintBusHealth(); });
+
+  // ── stats table + charts (only for CHECKED signals) ─────
+  function paintSelection(matched){
+    const sel = activeSignals(matched);
+    if(sel.length === 0){
+      statsWrap.innerHTML = '<div class="empty">No signals ticked.</div>';
+      chartsWrap.innerHTML = '<div class="empty">No signals ticked.</div>';
+      return;
+    }
+    const tbl = document.createElement('table');
+    tbl.innerHTML = `<thead><tr><th>Signal</th><th>Unit</th><th>N</th><th>Min</th><th>Max</th><th>Mean</th><th>Std</th></tr></thead>`;
+    const tbody = document.createElement('tbody');
+    sel.forEach(s=>{
+      const pts = windowPoints(s.points);
+      if(!pts.length) return;
+      const st = summarizeSeries(pts);
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${escHtml(s.name)}</td><td>${escHtml(s.unit||'—')}</td><td>${st.n}</td>
+        <td>${st.min.toFixed(4)}</td><td>${st.max.toFixed(4)}</td><td>${st.mean.toFixed(4)}</td><td>${st.std.toFixed(4)}</td>`;
+      tbody.appendChild(tr);
+    });
+    tbl.appendChild(tbody);
+    statsWrap.innerHTML = ''; statsWrap.appendChild(tbl);
+
+    charts.forEach(c=>c.destroy()); charts = [];
+    chartsWrap.innerHTML = '';
+    const tc = themeColors();
+    sel.slice(0, 24).forEach((s, i)=>{
+      const pts = thin(windowPoints(s.points), 2000);
+      if(!pts.length) return;
+      const card = document.createElement('div');
+      card.className = 'chartcard';
+      card.innerHTML = `<div class="ctitle"><b>${escHtml(s.name)}</b><span>${escHtml(s.unit||'')}</span></div><canvas></canvas>`;
+      chartsWrap.appendChild(card);
+      const ctx = card.querySelector('canvas');
+      const col = palette[i % palette.length];
+      const chart = new Chart(ctx, {
+        type:'line',
+        data:{ datasets:[{ data: pts.map(p=>({x:+(p.t-logT0).toFixed(4), y:p.v})), borderColor:col, backgroundColor:col+'22', fill:true, pointRadius:0, borderWidth:1.4, tension:0.1 }] },
+        options:{ responsive:true, maintainAspectRatio:false, animation:false, parsing:false,
+          plugins:{ legend:{ display:false } },
+          scales:{ x:{ type:'linear', title:{display:true,text:'t (s)', color:tc.tick, font:{size:9}}, grid:{color:tc.grid}, ticks:{color:tc.tick, font:{size:9}} },
+                    y:{ grid:{color:tc.grid}, ticks:{color:tc.tick, font:{size:9}} } } }
+      });
+      charts.push(chart);
+    });
+  }
+
+  // ── theme ────────────────────────────────────────────────
+  document.getElementById('themeSwitch').addEventListener('click', e=>{
+    const btn = e.target.closest('button[data-v]');
+    if(!btn) return;
+    document.documentElement.setAttribute('data-theme', btn.dataset.v);
+    document.querySelectorAll('#themeSwitch button').forEach(b=>b.classList.toggle('active', b===btn));
+    if(currentMatched.length) paintSelection(currentMatched);
+    if(allFrames.length) paintBusHealth();
+  });
+
+  // ── run (decode) ─────────────────────────────────────────
+  runBtn.addEventListener('click', ()=>{
+    clearLog();
+    trimStart = null; trimEnd = null;
+    trimBar.style.display = 'none';
+
+    log(`Parsing ${dbcFiles.length} DBC database(s)…`);
+    messages = [];
+    const seenIds = new Set(); let dupCount = 0;
+    for(const f of dbcFiles){
+      const msgs = loadMessageDefinitions(f.text);
+      let added = 0;
+      for(const m of msgs){
+        if(seenIds.has(m.id)){ dupCount++; continue; }
+        seenIds.add(m.id); messages.push(m); added++;
+      }
+      log(`  ${f.name} — ${msgs.length} message(s), ${added} new`, 'dim');
+    }
+    if(dupCount) log(`${dupCount} duplicate message ID(s) across databases — kept first definition.`, 'dim');
+
+    const declared = declaredBusSpeed(dbcFiles);
+    dbcBaudrate = declared.baudrate; dbcBaudrateConflict = declared.conflicting;
+    if(dbcBaudrate){
+      const note = dbcBaudrateConflict ? 'conflicting values across DBCs, using first' : 'BS_:';
+      log(`DBC declares bus speed: ${(dbcBaudrate/1000).toFixed(0)} kbit/s (${note})`, 'dim');
+      if(baudrateInp.value.trim() === '500000') baudrateInp.value = String(dbcBaudrate);
+    }
+
+    log('Loading log…');
+    let parsed;
+    try{ parsed = openTrace(logText); }
+    catch(err){ log('Log parse failed: '+err.message, 'err'); return; }
+    allFrames = parsed.frames;
+    allErrors = parsed.errors;
+    logMeta = parsed.meta;
+    frameNameById = {};
+    messages.forEach(m=> frameNameById[m.id] = m.name);
+    if(!allFrames.length){ log('No frames parsed from the log.', 'err'); return; }
+    log(`Detected ${parsed.meta.format} — ${allFrames.length} frame(s) (${parsed.counts.std} std, ${parsed.counts.ext} ext, ${parsed.counts.malformed} skipped, ${allErrors.length} error frame(s)).`, 'info');
+
+    const { series, matchedMsgs } = buildSignalSeries(allFrames, messages);
+    log(`Decoded ${series.length} signal(s) from ${matchedMsgs.length} message ID(s).`, 'info');
+
+    let first = allFrames[0].t, last = allFrames[0].t;
+    for(const f of allFrames){ if(f.t<first) first=f.t; if(f.t>last) last=f.t; }
+    logT0 = first; logDur = last - first;
+
+    roDate.textContent = logMeta.date; roStart.textContent = logMeta.start;
+    roEnd.textContent = logMeta.end; roDur.textContent = logMeta.duration.split(' · ')[0];
+    roFrames.textContent = allFrames.length; roSignals.textContent = series.length;
+
+    if(logDur > 0){ trimBar.style.display = ''; updateTrimInfo(); }
+
+    paintSignalChecklist(series);
+    paintSelection(series);
+    paintBusHealth();
+    downloadBtn.disabled = series.length === 0;
+  });
+
+  // ── export .xlsx ─────────────────────────────────────────
+  function uniqueSheetName(name, used){
+    let n = String(name).replace(/[:\\/?*\[\]]/g,' ').trim().slice(0,31) || 'Signal';
+    let out = n, i = 2;
+    while(used.has(out.toLowerCase())){ out = (n.slice(0,28)+'_'+i).slice(0,31); i++; }
+    used.add(out.toLowerCase());
+    return out;
+  }
+  async function appendRowsInChunks(sheet, rows, chunk, onProgress){
+    for(let i=0;i<rows.length;i+=chunk){
+      sheet.addRows(rows.slice(i, i+chunk));
+      if(onProgress) onProgress(Math.min(i+chunk, rows.length), rows.length);
+      await new Promise(r=>setTimeout(r,0));
+    }
+  }
+  function drawReportChart(title, captionText, dataPts, colorHex){
+    const off = document.createElement('canvas');
+    off.width = 1240; off.height = 460;
+    const chart = new Chart(off, {
+      type:'line',
+      data:{ datasets:[{ data: dataPts, borderColor:colorHex, backgroundColor:colorHex+'22', fill:true, pointRadius:0, borderWidth:2, tension:0.12 }] },
+      options:{ responsive:false, animation:false, parsing:false,
+        layout:{ padding:{ top:46, bottom:36, left:8, right:24 } },
+        plugins:{ legend:{ display:false } },
+        scales:{ x:{ type:'linear', grid:{color:'#e4e4e4'}, ticks:{color:'#333', font:{size:12}} },
+                  y:{ grid:{color:'#e4e4e4'}, ticks:{color:'#333', font:{size:12}} } } },
+      plugins:[{
+        id:'reportDecor',
+        beforeDraw(ch){ const {ctx}=ch; ctx.save(); ctx.fillStyle='#ffffff'; ctx.fillRect(0,0,ch.width,ch.height); ctx.restore(); },
+        afterDraw(ch){
+          const {ctx}=ch; ctx.save();
+          ctx.fillStyle='#111'; ctx.font='bold 20px Arial, sans-serif'; ctx.textAlign='center';
+          ctx.fillText(title, ch.width/2, 28);
+          ctx.font='13px Arial, sans-serif'; ctx.fillStyle='#444';
+          ctx.fillText(captionText, ch.width/2, ch.height-10);
+          ctx.restore();
+        }
+      }]
+    });
+    const dataUrl = off.toDataURL('image/png');
+    chart.destroy();
+    return dataUrl;
+  }
+
+  downloadBtn.addEventListener('click', async ()=>{
+    const allV = currentMatched.map(s=>({ name:s.name, unit:s.unit, msgId:s.msgId, points: windowPoints(s.points) })).filter(s=>s.points.length);
+    const chartV = activeSignals(currentMatched).map(s=>({ name:s.name, unit:s.unit, msgId:s.msgId, points: windowPoints(s.points) })).filter(s=>s.points.length);
+    const framesV = windowFrames(allFrames);
+    if(!allV.length){ log('Nothing to export.', 'err'); return; }
+    const prevLabel = downloadBtn.textContent;
+    downloadBtn.disabled = true;
+    try{
+      const t0 = logT0;
+      const tol = parseFloat(tolInput.value) || 0.1;
+      const baudrate = window.__lastBaudrate || parseFloat(baudrateInp.value) || 500000;
+      const health = window.__lastHealth || evaluateBusHealth(framesV, logDur, baudrate, STUFF_FACTOR);
+      const errs = window.__lastErrors || windowErrors(allErrors);
+      const wb = new ExcelJS.Workbook();
+      const usedNames = new Set();
+
+      const infoSheet = wb.addWorksheet(uniqueSheetName('Log Info', usedNames));
+      const trimmed = (trimStart != null || trimEnd != null);
+      const trimText = trimmed ? `${(trimStart||0).toFixed(3)}-${(trimEnd ?? logDur).toFixed(3)} s` : 'full log';
+      [
+        ['Format', logMeta.format], ['Date', logMeta.date], ['Start time', logMeta.start],
+        ['End time', logMeta.end], ['Duration', logMeta.duration], ['Trim window', trimText],
+        ['Total frames', framesV.length],
+        ['DBC databases', dbcFiles.map(f=>f.name).join(', ')],
+        ['Message IDs matched', [...new Set(allV.map(s=>'0x'+s.msgId.toString(16).toUpperCase()))].join(', ')],
+        ['Signals decoded', allV.length],
+        ['Generated by', 'CANDecode (open source)']
+      ].forEach(r=> infoSheet.addRow(r));
+      infoSheet.getColumn(1).font = { bold:true };
+      infoSheet.getColumn(1).width = 22; infoSheet.getColumn(2).width = 46;
+
+      const setProg = txt => { downloadBtn.textContent = txt; };
+
+      // Bus Health
+      const healthSheet = wb.addWorksheet(uniqueSheetName('Bus Health', usedNames));
+      const errCounts = {};
+      errs.forEach(e=> errCounts[e.kind] = (errCounts[e.kind]||0) + 1);
+      const dbcRate = window.__lastDbcBaudrate;
+      const rateMismatch = dbcRate && Math.abs(baudrate - dbcRate) > Math.max(1, 0.01 * dbcRate);
+      const overload = health.loadPeak > 100;
+      if(rateMismatch){
+        healthSheet.addRow([`⚠ DBC declares ${(dbcRate/1000).toFixed(0)} kbit/s (BS_:) but this analysis is using ${(baudrate/1000).toFixed(0)} kbit/s.`]);
+        healthSheet.lastRow.font = { bold:true, color:{ argb:'FFCC0000' } };
+      }
+      if(overload){
+        healthSheet.addRow([`⚠ Estimated peak bus load is ${health.loadPeak.toFixed(0)}% — impossible on a real bus; the assumed baud rate is very likely too low.`]);
+        healthSheet.lastRow.font = { bold:true, color:{ argb:'FFCC0000' } };
+      }
+      if(rateMismatch || overload) healthSheet.addRow([]);
+      const summaryRows = [
+        ['Baud rate assumed', `${(baudrate/1000).toFixed(0)} kbit/s`],
+      ];
+      if(dbcRate) summaryRows.push(['Baud rate declared by DBC (BS_:)', `${(dbcRate/1000).toFixed(0)} kbit/s`]);
+      summaryRows.push(
+        ['Bit-stuffing factor assumed', `${STUFF_FACTOR.toFixed(2)}x`],
+        ['Average bus load (est.)', `${health.loadAvg.toFixed(2)} %`],
+        ['Peak bus load (est.)', `${health.loadPeak.toFixed(2)} %`],
+        ['Unique message IDs seen', health.perId.length],
+        ['Total error frames', errs.length],
+      );
+      summaryRows.forEach(r=>{ healthSheet.addRow(r); healthSheet.lastRow.getCell(1).font = { bold:true }; });
+      healthSheet.addRow([]);
+      healthSheet.addRow(['Error Frame Types']); healthSheet.lastRow.font = { bold:true };
+      healthSheet.addRow(['Type','Count']); healthSheet.lastRow.font = { bold:true };
+      if(Object.keys(errCounts).length){
+        Object.entries(errCounts).sort((a,b)=>b[1]-a[1]).forEach(([k,n])=> healthSheet.addRow([k,n]));
+      } else {
+        healthSheet.addRow(['none detected in this trace']);
+      }
+      healthSheet.addRow([]);
+      healthSheet.addRow(['Per-Message-ID Timing']); healthSheet.lastRow.font = { bold:true };
+      healthSheet.addRow(['CAN_ID','Message','Count','Freq (Hz)','Avg gap (ms)','Std gap (ms)','Max gap (ms)','Dropout?']);
+      healthSheet.lastRow.font = { bold:true };
+      health.perId.forEach(r=> healthSheet.addRow([
+        '0x'+r.id.toString(16).toUpperCase(), r.name, r.count, +r.hz.toFixed(3),
+        +r.avgGapMs.toFixed(2), +r.stdGapMs.toFixed(2), +r.maxGapMs.toFixed(2), r.dropout?'YES':''
+      ]));
+      [12,24,10,11,13,13,13,10].forEach((w,i)=> healthSheet.getColumn(i+1).width = w);
+      if(errs.length){
+        healthSheet.addRow([]);
+        healthSheet.addRow(['Error Frame Log']); healthSheet.lastRow.font = { bold:true };
+        healthSheet.addRow(['Time_s','Type','Raw line']); healthSheet.lastRow.font = { bold:true };
+        errs.slice(0,5000).forEach(e=> healthSheet.addRow([+(e.t-t0).toFixed(4), e.kind, e.raw]));
+      }
+      if(health.bins.length){
+        setProg('Bus load chart…');
+        await new Promise(r=>setTimeout(r,0));
+        const dataUrl = drawReportChart('Bus load over time (estimated)',
+          `avg ${health.loadAvg.toFixed(2)}%  ·  peak ${health.loadPeak.toFixed(2)}%  ·  assumed ${(baudrate/1000).toFixed(0)} kbit/s`,
+          health.bins.map((t,i)=>({x:t,y:health.load[i]})), '#d33333');
+        const imgId = wb.addImage({ base64:dataUrl, extension:'png' });
+        healthSheet.addImage(imgId, { tl:{ col:9, row:1 }, ext:{ width:620, height:230 } });
+      }
+
+      // Summary — every decoded signal
+      const summarySheet = wb.addWorksheet(uniqueSheetName('Summary', usedNames));
+      summarySheet.addRow(['Signal','Unit','Samples','Min','Max','Mean','Std Dev']);
+      summarySheet.getRow(1).font = { bold:true };
+      allV.forEach(s=>{
+        const st = summarizeSeries(s.points);
+        summarySheet.addRow([s.name, s.unit||'', st.n, +st.min.toFixed(4), +st.max.toFixed(4), +st.mean.toFixed(4), +st.std.toFixed(4)]);
+      });
+
+      // CAN Frames (raw trace)
+      setProg('Frames…');
+      await new Promise(r=>setTimeout(r,0));
+      const framesSheet = wb.addWorksheet(uniqueSheetName('CAN Frames', usedNames));
+      framesSheet.addRow(['Time_s','Clock','CAN_ID','Type','Message','DLC','Data (hex)','B0','B1','B2','B3','B4','B5','B6','B7']);
+      framesSheet.getRow(1).font = { bold:true };
+      framesSheet.columns.forEach((c,i)=>{ c.width = i===6 ? 26 : (i<6 ? 11 : 5); });
+      const frameRows = framesV.map(f=>{
+        const hex = f.bytes.map(b=>b.toString(16).toUpperCase().padStart(2,'0'));
+        const row = [ +(f.t - t0).toFixed(4), secondsToClock(f.t), '0x'+f.id.toString(16).toUpperCase(),
+          f.extended ? 'Ext':'Std', frameNameById[f.id] || '', f.dlc, hex.join(' ') ];
+        for(let b=0;b<8;b++) row.push(b < hex.length ? hex[b] : '');
+        return row;
+      });
+      await appendRowsInChunks(framesSheet, frameRows, 5000, (done,total)=> setProg(`Frames ${Math.round(done/total*100)}%`));
+
+      // Merged — every decoded signal, one column each
+      setProg('Merging…');
+      await new Promise(r=>setTimeout(r,0));
+      const dataSheet = wb.addWorksheet(uniqueSheetName('Merged', usedNames));
+      const allTimes = new Set();
+      allV.forEach(s=> s.points.forEach(p=>allTimes.add(+(p.t-t0).toFixed(4))));
+      const times = Array.from(allTimes).sort((a,b)=>a-b);
+      const ncell = times.length * allV.length;
+      if(ncell > 1500000){
+        dataSheet.addRow([`Merged sheet skipped: ${times.length} time points x ${allV.length} signals = ${ncell.toLocaleString()} cells exceeds the 1,500,000-cell limit.`]);
+        dataSheet.addRow(['Trim the time window, then export again.']);
+        dataSheet.getRow(1).font = { bold:true };
+      } else {
+        dataSheet.addRow(['Time_s', ...allV.map(s=>s.unit ? `${s.name} [${s.unit}]` : s.name)]);
+        dataSheet.getRow(1).font = { bold:true };
+        const cols = allV.map(s=> nearestJoin(times, s.points.map(p=>({ t:p.t-t0, v:p.v })), tol));
+        const mergedRows = new Array(times.length);
+        for(let i=0;i<times.length;i++){
+          const row = new Array(allV.length + 1);
+          row[0] = +times[i].toFixed(4);
+          for(let c=0;c<cols.length;c++) row[c+1] = cols[c][i];
+          mergedRows[i] = row;
+        }
+        await appendRowsInChunks(dataSheet, mergedRows, 5000, (done,total)=> setProg(`Merging ${Math.round(done/total*100)}%`));
+      }
+
+      // Charts sheet — embed ONLY the ticked signals
+      if(chartV.length){
+        setProg('Charts…');
+        await new Promise(r=>setTimeout(r,0));
+        const chartsSheet = wb.addWorksheet(uniqueSheetName('Charts', usedNames));
+        let rowCursor = 1;
+        const ROW_PX = 20, COL_PX = 64, IMG_W = 640, IMG_H = 230;
+        const reportColors = ['#c67f00','#0e8fac','#a5228f','#2a8f43','#1f77d8','#e8433d'];
+        for(let i=0;i<chartV.length;i++){
+          setProg(`Charts ${i+1}/${chartV.length}`);
+          const s = chartV[i];
+          const st = summarizeSeries(s.points);
+          const col = reportColors[i % reportColors.length];
+          const dataUrl = drawReportChart(`${s.name}${s.unit ? '  ['+s.unit+']' : ''}`,
+            `Time (s)  |  Min ${st.min.toFixed(3)}   Max ${st.max.toFixed(3)}   Avg ${st.mean.toFixed(3)}`,
+            thin(s.points,2000).map(p=>({x:+(p.t-t0).toFixed(4), y:p.v})), col);
+          const imgId = wb.addImage({ base64:dataUrl, extension:'png' });
+          chartsSheet.addImage(imgId, { tl:{ col:0, row:rowCursor-1 }, ext:{ width:IMG_W, height:IMG_H } });
+          rowCursor += Math.ceil(IMG_H / ROW_PX) + 1;
+          await new Promise(r=>setTimeout(r,0));
+        }
+        chartsSheet.getColumn(1).width = IMG_W / COL_PX;
+      }
+
+      setProg('Writing file…');
+      await new Promise(r=>setTimeout(r,0));
+      const buffer = await wb.xlsx.writeBuffer();
+      const blob = new Blob([buffer], { type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      const filename = (logFileName || 'can_log') + '_decoded.xlsx';
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob); a.download = filename;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(a.href);
+      log(`Downloaded ${filename}.`, 'info');
+    } catch(e){
+      log('Export failed: '+e.message, 'err');
+    } finally {
+      downloadBtn.disabled = false;
+      downloadBtn.textContent = prevLabel;
+    }
+  });
+})();
+</script>
+</body>
+</html>
