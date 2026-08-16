@@ -205,6 +205,7 @@
         <div class="status" id="logStatus">none selected</div>
         <input type="file" id="logInput" accept=".log,.txt,.asc,.csv">
       </label>
+      <div class="subhead" style="margin:6px 0 0;">Runs best on short traces (~5–10 min). Very long logs (an hour+) parse more slowly and, on dense buses, can briefly freeze the tab while decoding or exporting.</div>
       <div class="fieldrow">
         <div class="field">
           <label>Merge tolerance (s)</label>
@@ -331,9 +332,18 @@
   let logT0 = 0, logDur = 0;
   let trimStart = null, trimEnd = null;
   let dbcBaudrate = null, dbcBaudrateConflict = false;
+  let cachedTrace = null;
+  let baudrateIsDefault = true;
 
   // ── small helpers ────────────────────────────────────────
   const pad2 = n => String(n).padStart(2,'0');
+  // Math.max/min(...arr) unpacks the array onto the call stack — for a
+  // dense CAN ID or signal over a long trace (100Hz+ for an hour is
+  // 360,000+ samples) that blows the engine's argument limit and throws,
+  // silently aborting whatever painted after it. Plain loops have no such
+  // ceiling.
+  function arrMax(arr){ let m = -Infinity; for(let i=0;i<arr.length;i++) if(arr[i]>m) m=arr[i]; return m; }
+  function arrMin(arr){ let m = Infinity; for(let i=0;i<arr.length;i++) if(arr[i]<m) m=arr[i]; return m; }
   function secondsToClock(t){
     t = ((t % 86400) + 86400) % 86400;
     const h = Math.floor(t/3600), m = Math.floor((t%3600)/60), s = Math.floor(t%60);
@@ -413,7 +423,21 @@
       logFileName = f.name.replace(/\.[^.]+$/, '');
       logDrop.classList.add('filled');
       refreshReadyState();
-    }catch(err){ log(err.message, 'err'); }
+    }catch(err){ log(err.message, 'err'); return; }
+
+    // Auto bit-rate: scan the log as soon as it's dropped in, so a hint is
+    // ready before Decode — this only needs frame timestamps/DLCs, not a DBC.
+    cachedTrace = null;
+    try{
+      cachedTrace = openTrace(logText);
+      if(cachedTrace.frames.length && baudrateIsDefault){
+        const suggestion = suggestBaudrate(cachedTrace.frames, cachedTrace.meta.durSec);
+        if(suggestion != null){
+          baudrateInp.value = String(suggestion);
+          log(`Auto bit rate (from log): ${(suggestion/1000).toFixed(0)} kbit/s — a lower-bound hint from the trace alone, not certified. A DBC's declared BS_: speed (if any) will still take priority once you Decode.`, 'info');
+        }
+      }
+    }catch(err){ /* best-effort pre-scan only — real parse errors surface on Decode */ }
   });
 
   // ── DBC parsing ─────────────────────────────────────────
@@ -639,7 +663,7 @@
     const n = vals.length;
     const mean = vals.reduce((a,b)=>a+b,0)/n;
     const variance = vals.reduce((a,b)=>a+(b-mean)*(b-mean),0)/n;
-    return { n, min: Math.min(...vals), max: Math.max(...vals), mean, std: Math.sqrt(variance) };
+    return { n, min: arrMin(vals), max: arrMax(vals), mean, std: Math.sqrt(variance) };
   }
   function windowPoints(points){
     if(trimStart == null && trimEnd == null) return points;
@@ -692,14 +716,14 @@
       if(gaps.length >= 4){
         const sorted = gaps.slice().sort((a,b)=>a-b);
         const med = sorted[Math.floor(sorted.length/2)];
-        if(med > 0 && Math.max(...gaps) > 3 * med) dropout = true;
+        if(med > 0 && arrMax(gaps) > 3 * med) dropout = true;
       }
       const mean = gaps.length ? gaps.reduce((a,b)=>a+b,0)/gaps.length : 0;
       const variance = gaps.length ? gaps.reduce((a,b)=>a+(b-mean)*(b-mean),0)/gaps.length : 0;
       perId.push({
         id: cid, name: frameNameById[cid] || '', count: n, hz: n/durSec,
         avgGapMs: mean, stdGapMs: Math.sqrt(variance),
-        maxGapMs: gaps.length ? Math.max(...gaps) : 0, dropout,
+        maxGapMs: gaps.length ? arrMax(gaps) : 0, dropout,
       });
     });
     perId.sort((a,b)=> b.count - a.count);
@@ -717,7 +741,7 @@
     const load = binBits.map(b => b / (windowSec * baudrate) * 100);
     const bins = Array.from({length:nBins}, (_,i)=> i*windowSec);
     const loadAvg = load.reduce((a,b)=>a+b,0) / load.length;
-    const loadPeak = Math.max(...load);
+    const loadPeak = arrMax(load);
     return { perId, bins, load, loadAvg, loadPeak };
   }
 
@@ -908,6 +932,7 @@
     paintSelection(currentMatched);
     paintBusHealth();
   });
+  baudrateInp.addEventListener('input', ()=>{ baudrateIsDefault = false; });
   baudrateInp.addEventListener('change', ()=>{ if(allFrames.length) paintBusHealth(); });
   autoBaudBtn.addEventListener('click', ()=>{
     if(!allFrames.length){ log('Run a decode first, then Auto can suggest a bit rate.', 'err'); return; }
@@ -1005,12 +1030,12 @@
     if(dbcBaudrate){
       const note = dbcBaudrateConflict ? 'conflicting values across DBCs, using first' : 'BS_:';
       log(`DBC declares bus speed: ${(dbcBaudrate/1000).toFixed(0)} kbit/s (${note})`, 'dim');
-      if(baudrateInp.value.trim() === '500000') baudrateInp.value = String(dbcBaudrate);
+      if(baudrateIsDefault) baudrateInp.value = String(dbcBaudrate);
     }
 
     log('Loading log…');
     let parsed;
-    try{ parsed = openTrace(logText); }
+    try{ parsed = cachedTrace || openTrace(logText); }
     catch(err){ log('Log parse failed: '+err.message, 'err'); return; }
     allFrames = parsed.frames;
     allErrors = parsed.errors;
