@@ -625,7 +625,7 @@ def analyze_bus_health(frames, dur_sec, frame_name_by_id, baudrate=500000.0,
 
     def _frame_bits(f):
         # approx overhead incl. arbitration/control/CRC/ACK/EOF/IFS, before stuffing
-        base = 65 if f.extended else 47
+        base = 67 if f.extended else 47
         return (base + 8 * f.dlc) * stuff_factor
 
     n_bins = max(1, int(np.ceil(dur_sec / window_sec)))
@@ -633,7 +633,13 @@ def analyze_bus_health(frames, dur_sec, frame_name_by_id, baudrate=500000.0,
     for f in frames:
         idx = min(n_bins - 1, max(0, int((f.t - t0) / window_sec)))
         bin_bits[idx] += _frame_bits(f)
-    load_pct = bin_bits / (window_sec * baudrate) * 100.0
+    # The last bin usually covers less than a full window_sec of real time
+    # (dur_sec rarely divides evenly) — dividing it by a full window's
+    # capacity like every other bin understates its load%, so give it its
+    # own (shorter) duration.
+    bin_durs = np.full(n_bins, window_sec)
+    bin_durs[-1] = dur_sec - (n_bins - 1) * window_sec
+    load_pct = bin_bits / (bin_durs * baudrate) * 100.0
     bin_starts = np.arange(n_bins) * window_sec
     return per_id, (bin_starts, load_pct), float(load_pct.mean()), float(load_pct.max())
 

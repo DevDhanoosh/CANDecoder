@@ -213,10 +213,7 @@
         </div>
         <div class="field">
           <label>Bus bit rate (bit/s)</label>
-          <div style="display:flex; gap:6px;">
-            <input type="text" id="baudrateInp" value="500000" style="flex:1;">
-            <button class="btn ghost" id="autoBaudBtn" type="button" title="Try each standard CAN bit rate and pick the lowest one that keeps peak bus load under 100% — a lower-bound hint, not a certified detection. Run a decode first.">Auto</button>
-          </div>
+          <input type="text" id="baudrateInp" value="500000">
         </div>
       </div>
       <button class="btn primary block" id="runBtn" disabled>▶ Decode</button>
@@ -301,7 +298,7 @@
   const checklistWrap = $('checklistWrap'), sigActions = $('sigActions');
   const selectAllBtn = $('selectAllBtn'), deselectAllBtn = $('deselectAllBtn');
   const statsWrap = $('statsWrap'), chartsWrap = $('chartsWrap');
-  const tolInput = $('tolInput'), baudrateInp = $('baudrateInp'), autoBaudBtn = $('autoBaudBtn');
+  const tolInput = $('tolInput'), baudrateInp = $('baudrateInp');
   const trimBar = $('trimBar'), trimStartInp = $('trimStartInp'), trimEndInp = $('trimEndInp');
   const trimApply = $('trimApply'), trimReset = $('trimReset'), trimInfo = $('trimInfo'), trimMode = $('trimMode');
   const roDate = $('roDate'), roStart = $('roStart'), roEnd = $('roEnd'), roDur = $('roDur'), roFrames = $('roFrames'), roSignals = $('roSignals');
@@ -425,19 +422,11 @@
       refreshReadyState();
     }catch(err){ log(err.message, 'err'); return; }
 
-    // Auto bit-rate: scan the log as soon as it's dropped in, so a hint is
-    // ready before Decode — this only needs frame timestamps/DLCs, not a DBC.
+    // Pre-parse the log as soon as it's dropped in so Decode can reuse this
+    // instead of parsing the same text twice.
     cachedTrace = null;
-    try{
-      cachedTrace = openTrace(logText);
-      if(cachedTrace.frames.length && baudrateIsDefault){
-        const suggestion = suggestBaudrate(cachedTrace.frames, cachedTrace.meta.durSec);
-        if(suggestion != null){
-          baudrateInp.value = String(suggestion);
-          log(`Auto bit rate (from log): ${(suggestion/1000).toFixed(0)} kbit/s — a lower-bound hint from the trace alone, not certified. A DBC's declared BS_: speed (if any) will still take priority once you Decode.`, 'info');
-        }
-      }
-    }catch(err){ /* best-effort pre-scan only — real parse errors surface on Decode */ }
+    try{ cachedTrace = openTrace(logText); }
+    catch(err){ /* best-effort pre-scan only — real parse errors surface on Decode */ }
   });
 
   // ── DBC parsing ─────────────────────────────────────────
@@ -732,33 +721,22 @@
     const nBins = Math.max(1, Math.ceil(durSec / windowSec));
     const binBits = new Array(nBins).fill(0);
     for(const f of frames){
-      const base = f.extended ? 65 : 47;
+      const base = f.extended ? 67 : 47;
       const bits = (base + 8*f.dlc) * stuffFactor;
       let idx = Math.floor((f.t - t0) / windowSec);
       if(idx < 0) idx = 0; if(idx > nBins-1) idx = nBins-1;
       binBits[idx] += bits;
     }
-    const load = binBits.map(b => b / (windowSec * baudrate) * 100);
+    // The last bin usually covers less than a full windowSec of real time
+    // (durSec rarely divides evenly) — dividing it by a full window's
+    // capacity like every other bin understates its load%, so give it its
+    // own (shorter) duration.
+    const lastBinDur = durSec - (nBins-1)*windowSec;
+    const load = binBits.map((b,i) => b / ((i === nBins-1 ? lastBinDur : windowSec) * baudrate) * 100);
     const bins = Array.from({length:nBins}, (_,i)=> i*windowSec);
     const loadAvg = load.reduce((a,b)=>a+b,0) / load.length;
     const loadPeak = arrMax(load);
     return { perId, bins, load, loadAvg, loadPeak };
-  }
-
-  // Baud-rate suggestion: for a fixed number of bits transmitted in a fixed
-  // window, estimated load is inversely proportional to the assumed baud
-  // rate — a rate that's too low can push estimated load past 100%, which
-  // is physically impossible, so those rates are ruled out. This can only
-  // ELIMINATE rates that are too low; it can't distinguish the true rate
-  // from any higher one on a lightly-loaded bus, so treat the result as a
-  // lower bound, not a certified detection.
-  const STANDARD_BAUDRATES = [10000, 20000, 50000, 100000, 125000, 250000, 500000, 1000000];
-  function suggestBaudrate(frames, durSec){
-    for(const rate of STANDARD_BAUDRATES){
-      const h = evaluateBusHealth(frames, durSec, rate, STUFF_FACTOR);
-      if(h.loadPeak <= 100) return rate;
-    }
-    return null;
   }
 
   function paintBusHealth(){
@@ -778,11 +756,11 @@
     if(overload){
       warnings.push(`Estimated peak bus load is ${health.loadPeak.toFixed(0)}%, which is impossible on a real `+
         `bus — the assumed baud rate (${(baudrate/1000).toFixed(0)} kbit/s) is very likely too low for this `+
-        `trace. Try the next standard speed up (e.g. 250000, 500000, 1000000), or click Auto.`);
+        `trace. Try the next standard speed up (e.g. 250000, 500000, 1000000).`);
     } else if(health.loadPeak > 85){
       warnings.push(`Estimated peak bus load is ${health.loadPeak.toFixed(0)}% — very high for a real bus. `+
         `Not impossible, but worth double-checking the assumed baud rate (${(baudrate/1000).toFixed(0)} kbit/s) `+
-        `is actually correct — try Auto or the next standard speed up.`);
+        `is actually correct.`);
     }
     window.__lastDbcBaudrate = dbcBaudrate;
     healthWarnings.innerHTML = warnings.map(w=>`<div class="warnbox">⚠ ${escHtml(w)}</div>`).join('');
@@ -934,19 +912,6 @@
   });
   baudrateInp.addEventListener('input', ()=>{ baudrateIsDefault = false; });
   baudrateInp.addEventListener('change', ()=>{ if(allFrames.length) paintBusHealth(); });
-  autoBaudBtn.addEventListener('click', ()=>{
-    if(!allFrames.length){ log('Run a decode first, then Auto can suggest a bit rate.', 'err'); return; }
-    const fr = windowFrames(allFrames);
-    const durSec = (trimEnd ?? logDur) - (trimStart ?? 0);
-    const suggestion = suggestBaudrate(fr, durSec);
-    if(suggestion == null){
-      log('No standard bit rate (10 kbit/s–1 Mbit/s) keeps peak bus load under 100% for this trace — check the trace or DLCs.', 'err');
-      return;
-    }
-    baudrateInp.value = String(suggestion);
-    log(`Auto bit rate: ${(suggestion/1000).toFixed(0)} kbit/s is the lowest standard rate that keeps peak load ≤100% — a lower-bound hint, not a certified detection (see Bus Health warnings).`, 'info');
-    paintBusHealth();
-  });
 
   // ── stats table + charts (only for CHECKED signals) ─────
   function paintSelection(matched){
