@@ -242,7 +242,7 @@
         </div>
         <div class="field">
           <label>Bus bit rate (bit/s)</label>
-          <input type="text" id="baudrateInp" value="500000">
+          <input type="text" id="baudrateInp" placeholder="auto / ask on Decode">
         </div>
       </div>
       <button class="btn primary block" id="runBtn" disabled>▶ Decode</button>
@@ -383,7 +383,7 @@
   let trimStart = null, trimEnd = null;
   let dbcBaudrate = null, dbcBaudrateConflict = false;
   let cachedTrace = null;
-  let baudrateIsDefault = true;
+  let baudrateSource = null;   // null | 'user' | 'log' | 'dbc' — precedence in that order
 
   // ── small helpers ────────────────────────────────────────
   const pad2 = n => String(n).padStart(2,'0');
@@ -478,8 +478,16 @@
     // Pre-parse the log as soon as it's dropped in so Decode can reuse this
     // instead of parsing the same text twice.
     cachedTrace = null;
-    try{ cachedTrace = openTrace(logText); }
-    catch(err){ /* best-effort pre-scan only — real parse errors surface on Decode */ }
+    try{
+      cachedTrace = openTrace(logText);
+      if(cachedTrace.fmt === 'busmaster' && baudrateSource !== 'user'){
+        const logBaud = readDeclaredLogBaudrate(logText);
+        if(logBaud){
+          baudrateInp.value = String(logBaud); baudrateSource = 'log';
+          log(`Bus bit rate detected from log: ${(logBaud/1000).toFixed(0)} kbit/s.`, 'dim');
+        }
+      }
+    }catch(err){ /* best-effort pre-scan only — real parse errors surface on Decode */ }
   });
 
   // ── DBC parsing ─────────────────────────────────────────
@@ -539,6 +547,25 @@
     if(/"Identifier \(hex\)"/i.test(head)) return 'csv';
     if(/\bBUSMASTER\b/i.test(head) || TRACE_LINE_RE.test(head.split(/\r?\n/).find(l=>l.trim()) || '')) return 'busmaster';
     return /^\s*"[^"]*"\s*,\s*"[0-9A-Fa-f]+"/m.test(head) ? 'csv' : 'busmaster';
+  }
+  // BUSMASTER records the channel's configured bus speed in its header, e.g.
+  // '***CHANNEL 1 - PCAN-USB Driver Id 16 - 250000 bps***'. Inactive/simulated
+  // channels are listed too, usually as '...- 000 bps***' — skip those and
+  // take the first channel with a real (nonzero) speed, which in a normal
+  // single-channel capture is Channel 1, listed first. Quoted-CSV traces
+  // (e.g. IXXAT MiniMon) do carry a 'Baudrate:' line too, but as an opaque
+  // controller register pair ("40 2B"), not a plain bit/s value — there's no
+  // verified table to decode that safely, so only BUSMASTER is attempted.
+  const CHANNEL_BAUD_RE = /CHANNEL\s+\d+[^\n]*?-\s*(\d+(?:\.\d+)?)\s*(k?)bps/ig;
+  function readDeclaredLogBaudrate(text){
+    const head = text.slice(0, 4000);
+    let m;
+    CHANNEL_BAUD_RE.lastIndex = 0;
+    while((m = CHANNEL_BAUD_RE.exec(head))){
+      const val = parseFloat(m[1]);
+      if(val > 0) return m[2] ? val*1000 : val;
+    }
+    return null;
   }
   function ingestTraceLog(text){
     const lines = text.split(/\r?\n/); const frames = []; const errors = [];
@@ -770,6 +797,10 @@
     });
     perId.sort((a,b)=> b.count - a.count);
 
+    // per-ID timing above is exact and doesn't need a bit rate — load % does,
+    // so skip it cleanly rather than dividing by a bogus/zero rate
+    if(!baudrate || baudrate <= 0) return { perId, bins:[], load:[], loadAvg:0, loadPeak:0 };
+
     const windowSec = 1.0;
     const nBins = Math.max(1, Math.ceil(durSec / windowSec));
     const binBits = new Array(nBins).fill(0);
@@ -794,33 +825,42 @@
 
   function paintBusHealth(){
     const durSec = (trimEnd ?? logDur) - (trimStart ?? 0);
-    const baudrate = parseFloat(baudrateInp.value) || 500000;
+    const baudrate = parseFloat(baudrateInp.value) || 0;
     const fr = windowFrames(allFrames);
     const errs = windowErrors(allErrors);
     const health = evaluateBusHealth(fr, durSec, baudrate, STUFF_FACTOR);
     window.__lastHealth = health; window.__lastErrors = errs; window.__lastBaudrate = baudrate;
 
     const warnings = [];
-    if(dbcBaudrate && Math.abs(baudrate - dbcBaudrate) > Math.max(1, 0.01 * dbcBaudrate)){
-      warnings.push(`DBC declares ${(dbcBaudrate/1000).toFixed(0)} kbit/s (BS_:) but this analysis is `+
-        `using ${(baudrate/1000).toFixed(0)} kbit/s — bus-load numbers below assume the wrong speed unless that's intentional.`);
-    }
     const overload = health.loadPeak > 100;
-    if(overload){
-      warnings.push(`Estimated peak bus load is ${health.loadPeak.toFixed(0)}%, which is impossible on a real `+
-        `bus — the assumed baud rate (${(baudrate/1000).toFixed(0)} kbit/s) is very likely too low for this `+
-        `trace. Try the next standard speed up (e.g. 250000, 500000, 1000000).`);
-    } else if(health.loadPeak > 85){
-      warnings.push(`Estimated peak bus load is ${health.loadPeak.toFixed(0)}% — very high for a real bus. `+
-        `Not impossible, but worth double-checking the assumed baud rate (${(baudrate/1000).toFixed(0)} kbit/s) `+
-        `is actually correct.`);
+    if(!baudrate){
+      warnings.push(`Bus bit rate is unknown — it wasn't declared in the log header or a loaded DBC, and `+
+        `couldn't be extracted. Enter it above (e.g. 500000) to see estimated bus load %. Per-ID timing `+
+        `below doesn't need it.`);
+    } else {
+      if(dbcBaudrate && Math.abs(baudrate - dbcBaudrate) > Math.max(1, 0.01 * dbcBaudrate)){
+        warnings.push(`DBC declares ${(dbcBaudrate/1000).toFixed(0)} kbit/s (BS_:) but this analysis is `+
+          `using ${(baudrate/1000).toFixed(0)} kbit/s — bus-load numbers below assume the wrong speed unless that's intentional.`);
+      }
+      if(overload){
+        warnings.push(`Estimated peak bus load is ${health.loadPeak.toFixed(0)}%, which is impossible on a real `+
+          `bus — the assumed baud rate (${(baudrate/1000).toFixed(0)} kbit/s) is very likely too low for this `+
+          `trace. Try the next standard speed up (e.g. 250000, 500000, 1000000).`);
+      } else if(health.loadPeak > 85){
+        warnings.push(`Estimated peak bus load is ${health.loadPeak.toFixed(0)}% — very high for a real bus. `+
+          `Not impossible, but worth double-checking the assumed baud rate (${(baudrate/1000).toFixed(0)} kbit/s) `+
+          `is actually correct.`);
+      }
     }
     window.__lastDbcBaudrate = dbcBaudrate;
     healthWarnings.innerHTML = warnings.map(w=>`<div class="warnbox">⚠ ${escHtml(w)}</div>`).join('');
 
-    healthTiles.innerHTML = `
+    healthTiles.innerHTML = baudrate ? `
       <div class="itile"><span class="ik">Avg bus load (est.)</span><span class="iv">${health.loadAvg.toFixed(2)}%</span></div>
       <div class="itile"><span class="ik">Peak bus load (est.)</span><span class="iv${overload?' warn':''}">${health.loadPeak.toFixed(2)}%</span></div>
+      <div class="itile"><span class="ik">Error frames</span><span class="iv${errs.length?' warn':''}">${errs.length}</span></div>` : `
+      <div class="itile"><span class="ik">Avg bus load (est.)</span><span class="iv">—</span></div>
+      <div class="itile"><span class="ik">Peak bus load (est.)</span><span class="iv">—</span></div>
       <div class="itile"><span class="ik">Error frames</span><span class="iv${errs.length?' warn':''}">${errs.length}</span></div>`;
 
     healthCharts.forEach(c=>c.destroy()); healthCharts = [];
@@ -963,7 +1003,7 @@
     paintSelection(currentMatched);
     paintBusHealth();
   });
-  baudrateInp.addEventListener('input', ()=>{ baudrateIsDefault = false; });
+  baudrateInp.addEventListener('input', ()=>{ baudrateSource = 'user'; });
   baudrateInp.addEventListener('change', ()=>{ if(allFrames.length) paintBusHealth(); });
 
   // ── stats table + charts (only for CHECKED signals) ─────
@@ -1048,7 +1088,9 @@
     if(dbcBaudrate){
       const note = dbcBaudrateConflict ? 'conflicting values across DBCs, using first' : 'BS_:';
       log(`DBC declares bus speed: ${(dbcBaudrate/1000).toFixed(0)} kbit/s (${note})`, 'dim');
-      if(baudrateIsDefault) baudrateInp.value = String(dbcBaudrate);
+      if(baudrateSource !== 'user' && baudrateSource !== 'log'){
+        baudrateInp.value = String(dbcBaudrate); baudrateSource = 'dbc';
+      }
     }
 
     log('Loading log…');
@@ -1078,6 +1120,17 @@
 
     paintSignalChecklist(series);
     paintSelection(series);
+    if(!parseFloat(baudrateInp.value)){
+      const ans = window.prompt("Bus bit rate wasn't found in the log header or a DBC.\n"+
+        'Enter it in bit/s (e.g. 500000, 250000, 125000) — Cancel to skip bus load %:', '');
+      const v = ans == null ? NaN : parseFloat(ans);
+      if(v > 0){
+        baudrateInp.value = String(v); baudrateSource = 'user';
+        log(`Bus bit rate set manually: ${(v/1000).toFixed(0)} kbit/s.`, 'dim');
+      } else {
+        log('No bus bit rate given — bus load % will show as unavailable until you enter one.', 'dim');
+      }
+    }
     paintBusHealth();
     downloadBtn.disabled = series.length === 0;
   });
@@ -1136,7 +1189,7 @@
     try{
       const t0 = logT0;
       const tol = parseFloat(tolInput.value) || 0.1;
-      const baudrate = window.__lastBaudrate || parseFloat(baudrateInp.value) || 500000;
+      const baudrate = window.__lastBaudrate || parseFloat(baudrateInp.value) || 0;
       const health = window.__lastHealth || evaluateBusHealth(framesV, logDur, baudrate, STUFF_FACTOR);
       const errs = window.__lastErrors || windowErrors(allErrors);
       const wb = new ExcelJS.Workbook();
@@ -1164,8 +1217,12 @@
       const errCounts = {};
       errs.forEach(e=> errCounts[e.kind] = (errCounts[e.kind]||0) + 1);
       const dbcRate = window.__lastDbcBaudrate;
-      const rateMismatch = dbcRate && Math.abs(baudrate - dbcRate) > Math.max(1, 0.01 * dbcRate);
-      const overload = health.loadPeak > 100;
+      const rateMismatch = baudrate && dbcRate && Math.abs(baudrate - dbcRate) > Math.max(1, 0.01 * dbcRate);
+      const overload = baudrate && health.loadPeak > 100;
+      if(!baudrate){
+        healthSheet.addRow([`⚠ Bus bit rate is unknown — bus load % below is unavailable. Per-ID timing doesn't need it.`]);
+        healthSheet.lastRow.font = { bold:true, color:{ argb:'FFCC0000' } };
+      }
       if(rateMismatch){
         healthSheet.addRow([`⚠ DBC declares ${(dbcRate/1000).toFixed(0)} kbit/s (BS_:) but this analysis is using ${(baudrate/1000).toFixed(0)} kbit/s.`]);
         healthSheet.lastRow.font = { bold:true, color:{ argb:'FFCC0000' } };
@@ -1174,15 +1231,15 @@
         healthSheet.addRow([`⚠ Estimated peak bus load is ${health.loadPeak.toFixed(0)}% — impossible on a real bus; the assumed baud rate is very likely too low.`]);
         healthSheet.lastRow.font = { bold:true, color:{ argb:'FFCC0000' } };
       }
-      if(rateMismatch || overload) healthSheet.addRow([]);
+      if(!baudrate || rateMismatch || overload) healthSheet.addRow([]);
       const summaryRows = [
-        ['Baud rate assumed', `${(baudrate/1000).toFixed(0)} kbit/s`],
+        ['Baud rate assumed', baudrate ? `${(baudrate/1000).toFixed(0)} kbit/s` : 'unknown'],
       ];
       if(dbcRate) summaryRows.push(['Baud rate declared by DBC (BS_:)', `${(dbcRate/1000).toFixed(0)} kbit/s`]);
       summaryRows.push(
         ['Bit-stuffing factor assumed', `${STUFF_FACTOR.toFixed(2)}x`],
-        ['Average bus load (est.)', `${health.loadAvg.toFixed(2)} %`],
-        ['Peak bus load (est.)', `${health.loadPeak.toFixed(2)} %`],
+        ['Average bus load (est.)', baudrate ? `${health.loadAvg.toFixed(2)} %` : 'n/a'],
+        ['Peak bus load (est.)', baudrate ? `${health.loadPeak.toFixed(2)} %` : 'n/a'],
         ['Unique message IDs seen', health.perId.length],
         ['Total error frames', errs.length],
       );

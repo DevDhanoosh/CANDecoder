@@ -1,44 +1,27 @@
 #!/usr/bin/env python3
-# ═══════════════════════════════════════════════════════════════════════════
-#  CANDecode — DBC-guided CAN bus log decoder, plotter, and Excel exporter
-#
-#  An open-source personal project. No proprietary or vendor DBC content is
-#  bundled or referenced — bring your own .dbc file(s) and trace log.
-#
-#  Author  : Dhanoosh B
-#  Contact : dhanoosh2001@gmail.com
-#  GitHub  : https://github.com/DevDhanoosh
-#  License : MIT (see LICENSE)
-#  Repo    : this folder is the whole project — a single dependency-light script
-# ═══════════════════════════════════════════════════════════════════════════
 """
-CANDecode — decode a CAN bus trace against one or more Vector DBC databases,
-plot every matched signal, and export a tidy Excel workbook.
+CAN log analyzer — DBC-guided decode, validation, plots and Excel export.
 
-Decoding follows the standard Vector DBC convention: Intel (little-endian)
-and Motorola (big-endian, "sawtooth") bit layouts, with 2's-complement signed
-signals.
+Supports two trace formats (auto-detected):
+  * BUSMASTER  ASCII log   (.log / .asc / .txt)
+  * IXXAT MiniMon V3 CSV   (.csv)
 
-Supported trace formats (auto-detected):
-  * BUSMASTER ASCII log        (.log / .asc / .txt)
-  * Quoted CSV trace           (.csv)  — "Time","ID(hex)","Std/Ext","DLC","Data"
-                                          style export, MiniMon-compatible
+Decoding matches the Vector DBC convention: Intel (little-endian) and
+Motorola (big-endian, "sawtooth") bit layouts, with 2's-complement signed
+signals. The Motorola walk and sign-extension are the same logic validated
+in the browser tool.
 
 Typical use
 -----------
-    python candecode.py --dbc vehicle.dbc --log trace.log --out ./out
-    python candecode.py --dbc a.dbc b.dbc --log capture.csv --out ./out \
+    python can_log_analyzer.py --dbc vehicle.dbc --log trace.log --out ./out
+    python can_log_analyzer.py --dbc a.dbc b.dbc --log capture.csv --out ./out \
         --signals MotorTorque PackCurrent --show
 
-Run with no arguments to get interactive file-picker dialogs instead.
-
 Outputs (under --out):
-    <log>_decoded.xlsx      Log Info / Summary / CAN Frames / Merged (every
-                             decoded signal) / Charts (only the signals you
-                             asked to chart, via --signals)
-    plots/<signal>.png      one time-series graph per charted signal
-    plots/_overlay.png      charted signals overlaid, independent y-axes
-    plots/_overlay_norm.png same, each signal normalized 0..1
+    <log>_report.xlsx      Log Info / Summary / CAN Frames / Merged (all signals)
+    plots/<signal>.png     one time-series graph per decoded signal
+    plots/_overlay.png     all selected signals, independent y-axes
+    plots/_overlay_norm.png  same, each signal normalized 0..1
 
 Dependencies: numpy (required), matplotlib + openpyxl (optional, for plots /
 Excel). tqdm is optional — a built-in progress bar is used if it is absent.
@@ -50,10 +33,10 @@ import re
 import sys
 import time
 
-# The distributed .exe is built windowed (no console) so double-clicking it
-# doesn't pop a black terminal — but that means sys.stdout/stderr/stdin are
-# None (no console to attach to), and this script prints throughout. Redirect
-# to a null sink up front instead of guarding every print()/input() call.
+# A windowed build (or pythonw.exe / a frozen console=False .exe) has no
+# console attached, so sys.stdout/stderr/stdin are None — this module and
+# its GUI front-end print/write throughout. Redirect to a null sink up
+# front instead of guarding every call site.
 if sys.stdout is None:
     sys.stdout = open(os.devnull, "w")
 if sys.stderr is None:
@@ -110,25 +93,25 @@ except ImportError:                       # minimal drop-in if tqdm isn't presen
 MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
-__version__ = "1.0.0"
+__version__ = "2.1-interactive"
 
 
 # ════════════════════════════════════════════════════════════════════════════
 #  DBC parsing
 # ════════════════════════════════════════════════════════════════════════════
-MESSAGE_LINE_RE = re.compile(r"^BO_\s+(\d+)\s+(\w+)\s*:\s*(\d+)\s+(\S+)")
-SIGNAL_LINE_RE = re.compile(
+BO_RE = re.compile(r"^BO_\s+(\d+)\s+(\w+)\s*:\s*(\d+)\s+(\S+)")
+SG_RE = re.compile(
     r'^\s*SG_\s+(\w+)\s*:\s*(\d+)\|(\d+)@(\d)([+-])\s*'
     r'\(([^,]+),([^)]+)\)\s*\[([^|]*)\|([^\]]*)\]\s*"([^"]*)"'
 )
 
 
-def load_message_definitions(text):
+def parse_dbc(text):
     """Return a list of message dicts with nested signal dicts."""
     messages = []
     current = None
     for raw in text.splitlines():
-        m = MESSAGE_LINE_RE.match(raw)
+        m = BO_RE.match(raw)
         if m:
             mid = int(m.group(1))
             extended = mid >= 0x80000000
@@ -138,7 +121,7 @@ def load_message_definitions(text):
                            sender=m.group(4), extended=extended, signals=[])
             messages.append(current)
             continue
-        m = SIGNAL_LINE_RE.match(raw)
+        m = SG_RE.match(raw)
         if m and current is not None:
             current["signals"].append(dict(
                 name=m.group(1), start_bit=int(m.group(2)), length=int(m.group(3)),
@@ -149,36 +132,7 @@ def load_message_definitions(text):
     return messages
 
 
-BUS_SPEED_LINE_RE = re.compile(r"^BS_\s*:\s*(\d+)")
-
-
-def read_declared_bus_speed(text):
-    """Vector DBC BS_: record, when present, declares the bus speed in
-    kbit/s (e.g. 'BS_: 500' -> 500000 bit/s). Most modern DBC exports leave
-    this blank — returns None when there's nothing to read."""
-    for raw in text.splitlines():
-        m = BUS_SPEED_LINE_RE.match(raw.strip())
-        if m:
-            return float(m.group(1)) * 1000.0
-    return None
-
-
-def declared_bus_speed(dbc_paths):
-    """(baudrate_or_None, conflicting) — the bus speed declared by BS_:
-    across the given DBCs. If more than one DBC declares a different
-    value, conflicting=True and the first non-None value wins."""
-    found = []
-    for path in dbc_paths:
-        with open(path, "r", errors="replace") as fh:
-            br = read_declared_bus_speed(fh.read())
-        if br is not None:
-            found.append(br)
-    if not found:
-        return None, False
-    return found[0], len(set(found)) > 1
-
-
-def combine_databases(dbc_paths, max_dbc=10):
+def merge_dbcs(dbc_paths, max_dbc=10):
     """Parse and merge several DBCs; first definition of an ID wins."""
     messages, seen, dups = [], set(), 0
     if len(dbc_paths) > max_dbc:
@@ -186,7 +140,7 @@ def combine_databases(dbc_paths, max_dbc=10):
         dbc_paths = dbc_paths[:max_dbc]
     for path in dbc_paths:
         with open(path, "r", errors="replace") as fh:
-            msgs = load_message_definitions(fh.read())
+            msgs = parse_dbc(fh.read())
         added = 0
         for msg in msgs:
             if msg["id"] in seen:
@@ -203,38 +157,24 @@ def combine_databases(dbc_paths, max_dbc=10):
 
 
 # ════════════════════════════════════════════════════════════════════════════
-#  Log parsing  (BUSMASTER + a generic quoted-CSV trace), auto-detected
+#  Log parsing  (BUSMASTER + IXXAT MiniMon), auto-detected
 # ════════════════════════════════════════════════════════════════════════════
-TRACE_LINE_RE = re.compile(
+BUSMASTER_RE = re.compile(
     r"^(\d{2}):(\d{2}):(\d{2}):(\d{4})\s+(?:Rx|Tx)\s+\d+\s+"
     r"0x([0-9A-Fa-f]+)\s+([sx])\s+(\d+)((?:\s+[0-9A-Fa-f]{2})*)"
 )
 
-
-def sniff_trace_format(text_head):
-    if '"Identifier (hex)"' in text_head:
-        return "csv"
-    if re.search(r"\bBUSMASTER\b", text_head, re.I):
-        return "busmaster"
-    # content sniff: quoted-CSV data rows => csv
-    if re.search(r'^\s*"[^"]*"\s*,\s*"[0-9A-Fa-f]+"', text_head, re.M):
-        return "csv"
-    return "busmaster"
-
-
 # BUSMASTER records the channel's configured bus speed in its header, e.g.
 # '***CHANNEL 1 - PCAN-USB Driver Id 16 - 250000 bps***'. Inactive/simulated
-# channels are listed too, usually as '...- 000 bps***' — skip those and take
-# the first channel with a real (nonzero) speed, which in a normal
-# single-channel capture is Channel 1, listed first. Quoted-CSV traces (e.g.
-# IXXAT MiniMon) do carry a 'Baudrate:' line too, but as an opaque controller
-# register pair ("40 2B"), not a plain bit/s value — no verified table to
-# decode that safely, so only BUSMASTER is attempted.
+# channels are listed too, usually as '...- 000 bps***' — skip those and
+# take the first channel with a real (nonzero) speed, which in a normal
+# single-channel capture is Channel 1, listed first.
 CHANNEL_BAUD_RE = re.compile(r"CHANNEL\s+\d+[^\n]*?-\s*(\d+(?:\.\d+)?)\s*(k?)bps", re.I)
 
 
 def declared_log_baudrate(text_head):
-    """Bit/s declared in a BUSMASTER log header, or None if it's not there."""
+    """Bit/s declared in a BUSMASTER log header, or None if it's not there
+    (older exports, a different tool, or no active channel found)."""
     for m in CHANNEL_BAUD_RE.finditer(text_head):
         val = float(m.group(1))
         if val <= 0:
@@ -243,7 +183,18 @@ def declared_log_baudrate(text_head):
     return None
 
 
-class CanFrame:
+def detect_format(text_head):
+    if re.search(r"IXXAT\s+MiniMon", text_head, re.I) or '"Identifier (hex)"' in text_head:
+        return "minimon"
+    if re.search(r"\bBUSMASTER\b", text_head, re.I):
+        return "busmaster"
+    # content sniff: quoted-CSV data rows => minimon
+    if re.search(r'^\s*"[^"]*"\s*,\s*"[0-9A-Fa-f]+"', text_head, re.M):
+        return "minimon"
+    return "busmaster"
+
+
+class Frame:
     __slots__ = ("t", "id", "dlc", "data", "extended")
 
     def __init__(self, t, cid, dlc, data, extended):
@@ -254,43 +205,15 @@ class CanFrame:
         self.extended = extended
 
 
-# ── CAN protocol error-frame recognition ─────────────────────────────────────
-# Best-effort: a plain ASCII trace only reports an error frame's sub-type
-# (Stuff / Form / CRC / ACK / Bit / Overload) if the logging tool itself wrote
-# that word into the line. We recognise it when present and otherwise still
-# count the frame under "Error CanFrame (type not logged)" — we never fabricate
-# a sub-type the source log didn't actually record.
-ERROR_TAGS = [
-    ("stuff", "Stuff Error"), ("form", "Form Error"), ("crc", "CRC Error"),
-    ("ack", "ACK Error"), ("bit", "Bit Error"), ("overload", "Overload CanFrame"),
-]
-TRACE_TIMESTAMP_RE = re.compile(r"^(\d{2}):(\d{2}):(\d{2}):(\d{4})\s+(.*)$")
-
-
-def _label_error_frame(text):
-    low = text.lower()
-    for kw, label in ERROR_TAGS:
-        if kw in low:
-            return label
-    return "Error CanFrame (type not logged)"
-
-
-def ingest_trace_log(text):
-    frames, std, ext, bad, errors = [], 0, 0, 0, []
+def parse_busmaster(text):
+    frames, std, ext, bad = [], 0, 0, 0
     for raw in text.splitlines():
         line = raw.strip()
         if not line or line.startswith("***"):
             continue
-        m = TRACE_LINE_RE.match(line)
+        m = BUSMASTER_RE.match(line)
         if not m:
-            tm = TRACE_TIMESTAMP_RE.match(line)
-            if not tm:
-                continue
-            hh, mm, ss, frac, rest = tm.groups()
-            if re.search(r"error", rest, re.I):
-                t = int(hh) * 3600 + int(mm) * 60 + int(ss) + int(frac) / 10000.0
-                errors.append(dict(t=t, kind=_label_error_frame(rest), raw=line[:120]))
-            else:
+            if re.match(r"^\d{2}:\d{2}:\d{2}", line):
                 bad += 1
             continue
         hh, mm, ss, frac, idhex, typ, dlc, bytestr = m.groups()
@@ -304,11 +227,11 @@ def ingest_trace_log(text):
         extended = typ == "x"
         std += not extended
         ext += extended
-        frames.append(CanFrame(t, cid, dlc, data[:dlc], extended))
-    return frames, dict(std=std, ext=ext, malformed=bad), errors
+        frames.append(Frame(t, cid, dlc, data[:dlc], extended))
+    return frames, dict(std=std, ext=ext, malformed=bad)
 
 
-def _split_quoted_row(line):
+def _split_csv(line):
     out, cur, in_q = [], [], False
     i, n = 0, len(line)
     while i < n:
@@ -332,12 +255,11 @@ def _split_quoted_row(line):
     return out
 
 
-ROW_TIMESTAMP_RE = re.compile(r"^\s*(\d{1,2}):(\d{2}):(\d{2})[.:](\d{1,6})\s*$")
+MINIMON_TIME_RE = re.compile(r"^\s*(\d{1,2}):(\d{2}):(\d{2})[.:](\d{1,6})\s*$")
 
 
-def ingest_quoted_csv(text):
-    """Quoted CSV trace: Time, ID(hex), Std/Ext, DLC, Data(hex bytes)."""
-    frames, std, ext, bad, errors = [], 0, 0, 0, []
+def parse_minimon(text):
+    frames, std, ext, bad = [], 0, 0, 0
     started = False
     for raw in text.splitlines():
         line = raw.strip()
@@ -347,20 +269,17 @@ def ingest_quoted_csv(text):
             if re.match(r'^"?\s*Time\s*"?\s*,', line, re.I):
                 started = True
             continue
-        f = _split_quoted_row(line)
+        f = _split_csv(line)
         if len(f) < 5:
             bad += 1
             continue
-        tm = ROW_TIMESTAMP_RE.match(f[0])
+        tm = MINIMON_TIME_RE.match(f[0])
         if not tm:
             bad += 1
             continue
         frac = tm.group(4)
         t = int(tm.group(1)) * 3600 + int(tm.group(2)) * 60 + int(tm.group(3)) \
             + int(frac) / (10 ** len(frac))
-        if re.search(r"\berr", ",".join(f), re.I):
-            errors.append(dict(t=t, kind=_label_error_frame(",".join(f)), raw=line[:120]))
-            continue
         try:
             cid = int(f[1].strip(), 16)
         except ValueError:
@@ -371,12 +290,12 @@ def ingest_quoted_csv(text):
         extended = "ext" in f[2].lower()
         std += not extended
         ext += extended
-        frames.append(CanFrame(t, cid, len(data), data, extended))
-    return frames, dict(std=std, ext=ext, malformed=bad), errors
+        frames.append(Frame(t, cid, len(data), data, extended))
+    return frames, dict(std=std, ext=ext, malformed=bad)
 
 
 # ── metadata (date / start / end / duration) ────────────────────────────────
-def _normalize_date(raw, hint):
+def _fmt_date(raw, hint):
     parts = [p for p in re.split(r"[^0-9]+", raw) if p]
     if len(parts) < 3:
         return raw
@@ -395,7 +314,7 @@ def _normalize_date(raw, hint):
     return f"{d:02d} {mon} {year}"
 
 
-def _to_24h(s):
+def _to24(s):
     m = re.search(r"(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?", s, re.I)
     if not m:
         return s.strip()
@@ -408,19 +327,19 @@ def _to_24h(s):
     return f"{h:02d}:{m.group(2)}:{m.group(3) or '00'}"
 
 
-def _seconds_to_clock(t):
+def _sec_to_clock(t):
     t = t % 86400
     h = int(t // 3600); m = int((t % 3600) // 60); s = int(t % 60)
     ms = round((t - int(t)) * 1000)
     return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
 
 
-def _format_span(sec):
+def _fmt_duration(sec):
     h = int(sec // 3600); m = int((sec % 3600) // 60); s = sec % 60
     return f"{sec:.3f} s  ({h:02d}:{m:02d}:{s:06.3f})"
 
 
-def resolve_trim_value(val, log_t0):
+def parse_trim_value(val, log_t0):
     """
     Convert a trim value to seconds-from-log-start. Accepts a plain number
     (already relative seconds) or a clock string 'HH:MM:SS[.mmm]' / 'MM:SS',
@@ -444,8 +363,8 @@ def resolve_trim_value(val, log_t0):
     return float(val)
 
 
-def collect_log_metadata(text, frames, fmt):
-    meta = dict(format="Quoted CSV trace" if fmt == "csv" else "BUSMASTER",
+def build_meta(text, frames, fmt):
+    meta = dict(format="IXXAT MiniMon" if fmt == "minimon" else "BUSMASTER",
                 version="—", date="—", start="—", end="—",
                 duration="—", dur_sec=0.0, frames=len(frames))
     if frames:
@@ -455,45 +374,51 @@ def collect_log_metadata(text, frames, fmt):
         if dur < 0:
             dur += 86400
         meta["dur_sec"] = dur
-        meta["duration"] = _format_span(dur)
-        meta["start"] = _seconds_to_clock(first)
-        meta["end"] = _seconds_to_clock(last)
-    if fmt == "csv":
+        meta["duration"] = _fmt_duration(dur)
+        meta["start"] = _sec_to_clock(first)
+        meta["end"] = _sec_to_clock(last)
+    if fmt == "minimon":
+        v = re.search(r"MiniMon[^\n]*Version:\s*([\d.]+)", text, re.I)
+        if v:
+            meta["version"] = v.group(1)
         d = re.search(r"^\s*Date:\s*([0-9]{1,4}[\/\-.][0-9]{1,2}[\/\-.][0-9]{1,4})",
                       text, re.I | re.M)
         if d:
-            meta["date"] = _normalize_date(d.group(1), "mdy")
+            meta["date"] = _fmt_date(d.group(1), "mdy")
         s = re.search(r"Start time:\s*([0-9:]+\s*(?:AM|PM)?)", text, re.I)
         e = re.search(r"Stop time:\s*([0-9:]+\s*(?:AM|PM)?)", text, re.I)
         if s:
-            meta["start"] = _to_24h(s.group(1))
+            meta["start"] = _to24(s.group(1))
         if e:
-            meta["end"] = _to_24h(e.group(1))
+            meta["end"] = _to24(e.group(1))
     else:
         d = re.search(r"START DATE(?:\s+AND\s+TIME)?\s*[:\-]?\s*"
                       r"([0-9]{1,2}[:\-\/][0-9]{1,2}[:\-\/][0-9]{2,4})", text, re.I)
         if d:
-            meta["date"] = _normalize_date(d.group(1), "dmy")
+            meta["date"] = _fmt_date(d.group(1), "dmy")
         v = re.search(r"BUSMASTER\s+Ver\s*([0-9][0-9.]*)", text, re.I)
         if v:
             meta["version"] = v.group(1)
     return meta
 
 
-def open_trace(path):
+def load_log(path):
     with open(path, "r", errors="replace") as fh:
         text = fh.read()
-    fmt = sniff_trace_format(text[:3000])
-    frames, counts, errors = (ingest_quoted_csv if fmt == "csv" else ingest_trace_log)(text)
-    meta = collect_log_metadata(text, frames, fmt)
+    fmt = detect_format(text[:3000])
+    frames, counts = (parse_minimon if fmt == "minimon" else parse_busmaster)(text)
+    meta = build_meta(text, frames, fmt)
+    # MiniMon CSVs do carry a "Baudrate:" header line, but as an opaque
+    # controller register pair (e.g. "40 2B"), not a plain bit/s value — no
+    # verified table to decode that safely, so only BUSMASTER is attempted.
     meta["baudrate"] = declared_log_baudrate(text[:4000]) if fmt == "busmaster" else None
-    return fmt, frames, counts, meta, errors
+    return fmt, frames, counts, meta
 
 
 # ════════════════════════════════════════════════════════════════════════════
 #  Signal decode  (vectorized over frames; validated bit-walk)
 # ════════════════════════════════════════════════════════════════════════════
-def _bit_layout(sig):
+def _signal_bit_map(sig):
     """List of (byte_idx, bit_in_byte, dest_shift) — exact Vector layout."""
     length = sig["length"]
     out = []
@@ -509,7 +434,7 @@ def _bit_layout(sig):
     return out
 
 
-def extract_signal_values(data_matrix, sig):
+def decode_signal_vec(data_matrix, sig):
     """
     data_matrix : uint8 array (n_frames, width) already zero-padded to the
                   message DLC.  Returns float64 array of engineering values.
@@ -517,9 +442,9 @@ def extract_signal_values(data_matrix, sig):
     length = sig["length"]
     n, width = data_matrix.shape
     if length > 63:                                   # rare wide signal -> Python big-int path
-        return _extract_signal_values_bigint(data_matrix, sig)
+        return _decode_signal_slow(data_matrix, sig)
     raw = np.zeros(n, dtype=np.int64)
-    for byte_idx, bit_in_byte, dest in _bit_layout(sig):
+    for byte_idx, bit_in_byte, dest in _signal_bit_map(sig):
         if byte_idx >= width:
             continue
         bit = (data_matrix[:, byte_idx] >> bit_in_byte) & 1
@@ -530,9 +455,9 @@ def extract_signal_values(data_matrix, sig):
     return raw.astype(np.float64) * sig["scale"] + sig["offset"]
 
 
-def _extract_signal_values_bigint(data_matrix, sig):
+def _decode_signal_slow(data_matrix, sig):
     length = sig["length"]
-    bmap = _bit_layout(sig)
+    bmap = _signal_bit_map(sig)
     out = np.empty(data_matrix.shape[0], dtype=np.float64)
     for r in range(data_matrix.shape[0]):
         row = data_matrix[r]
@@ -546,7 +471,7 @@ def _extract_signal_values_bigint(data_matrix, sig):
     return out
 
 
-def build_signal_series(frames, messages, wanted=None):
+def decode_all(frames, messages, wanted=None):
     """
     Group frames by ID, then decode every (selected) signal on each matched
     message.  Returns list of signal series dicts:
@@ -580,7 +505,7 @@ def build_signal_series(frames, messages, wanted=None):
         for sig in msg["signals"]:
             if wanted and sig["name"] not in wanted:
                 continue
-            v = extract_signal_values(mat, sig)
+            v = decode_signal_vec(mat, sig)
             series.append(dict(name=sig["name"], unit=sig["unit"],
                                msg_id=msg["id"], t=t, v=v))
     return series, matched_msgs
@@ -594,7 +519,7 @@ def stats(v):
                 mean=float(v.mean()), std=float(v.std()))
 
 
-def nearest_join(times, stimes, svals, tol):
+def merge_asof_nearest(times, stimes, svals, tol):
     """Nearest-value join within tolerance; NaN where nothing is close."""
     if len(stimes) == 0:
         return np.full(len(times), np.nan)
@@ -609,24 +534,41 @@ def nearest_join(times, stimes, svals, tol):
 
 
 # ════════════════════════════════════════════════════════════════════════════
-#  Bus load & health — per-ID frequency/jitter/dropout, and an estimated
-#  bus-load-over-time curve. Bus load is necessarily an ESTIMATE: a plain
-#  ASCII trace doesn't record the exact bit-stuffed frame length, so it's
-#  derived from the standard CAN frame overhead (SOF/arbitration/control/
-#  CRC/ACK/EOF/IFS) plus a configurable average stuffing inflation factor —
-#  good enough to see load trends and hotspots, not a certified measurement.
+#  Bus health  (per-ID timing is exact; bus load % is an estimate — see
+#  BUS_LOAD_FORMULA)
 # ════════════════════════════════════════════════════════════════════════════
+BUS_LOAD_FORMULA = (
+    "Bus load % = (bits estimated in each 1-second window) / "
+    "(assumed bit rate x 1 s) x 100.\n"
+    "Per frame: (47 overhead bits for a standard frame, 67 for extended — "
+    "SOF + arbitration + control + CRC + ACK + EOF + IFS, per ISO 11898-1) "
+    "+ 8 x DLC data bits, then x1.1 for average bit-stuffing inflation "
+    "(a plain ASCII trace doesn't record each frame's true stuffed length).\n"
+    "This is an estimate for spotting load trends and hotspots, not a "
+    "certified measurement — accuracy depends entirely on the assumed bit "
+    "rate matching the real bus."
+)
+_STUFF_FACTOR = 1.1
+
+
 def analyze_bus_health(frames, dur_sec, frame_name_by_id, baudrate=500000.0,
-                       stuff_factor=1.1, window_sec=1.0, dropout_mult=3.0):
+                       stuff_factor=_STUFF_FACTOR, window_sec=1.0, dropout_mult=3.0):
     """
-    Returns (per_id, load_ts, load_avg, load_peak):
-      per_id  : list of dicts sorted by frame count desc —
-                {id, name, count, hz, avg_gap_ms, std_gap_ms, max_gap_ms, dropout}
-      load_ts : (bin_starts_sec, load_pct) arrays, one point per `window_sec` bin
-      load_avg, load_peak : float, percent
+    Per-ID frame timing (exact, from frame timestamps) plus an estimated
+    bus-load-over-time (see BUS_LOAD_FORMULA for exactly how).
+
+    Returns dict(per_id, bins, load, load_avg, load_peak):
+      per_id : list of dicts sorted by frame count desc —
+               {id, name, count, hz, avg_gap_ms, std_gap_ms, max_gap_ms, dropout}
+               A "dropout" flag means that ID's longest gap was more than
+               dropout_mult x its own median gap.
+      bins, load : ndarrays, one point per window_sec bin — bin start (s
+               from the first frame) and estimated load (%).
+      load_avg, load_peak : float, percent.
     """
     if not frames or dur_sec <= 0:
-        return [], (np.array([]), np.array([])), 0.0, 0.0
+        return dict(per_id=[], bins=np.array([]), load=np.array([]),
+                    load_avg=0.0, load_peak=0.0)
 
     ts = np.fromiter((f.t for f in frames), float, len(frames))
     t0 = float(ts.min())
@@ -655,7 +597,6 @@ def analyze_bus_health(frames, dur_sec, frame_name_by_id, baudrate=500000.0,
     per_id.sort(key=lambda r: -r["count"])
 
     def _frame_bits(f):
-        # approx overhead incl. arbitration/control/CRC/ACK/EOF/IFS, before stuffing
         base = 67 if f.extended else 47
         return (base + 8 * f.dlc) * stuff_factor
 
@@ -664,15 +605,16 @@ def analyze_bus_health(frames, dur_sec, frame_name_by_id, baudrate=500000.0,
     for f in frames:
         idx = min(n_bins - 1, max(0, int((f.t - t0) / window_sec)))
         bin_bits[idx] += _frame_bits(f)
-    # The last bin usually covers less than a full window_sec of real time
-    # (dur_sec rarely divides evenly) — dividing it by a full window's
-    # capacity like every other bin understates its load%, so give it its
-    # own (shorter) duration.
+    # the last bin usually covers less than a full window_sec of real time
+    # (dur_sec rarely divides evenly) — size it to its actual span, or it's
+    # systematically undercounted against a full window's capacity
     bin_durs = np.full(n_bins, window_sec)
     bin_durs[-1] = dur_sec - (n_bins - 1) * window_sec
     load_pct = bin_bits / (bin_durs * baudrate) * 100.0
     bin_starts = np.arange(n_bins) * window_sec
-    return per_id, (bin_starts, load_pct), float(load_pct.mean()), float(load_pct.max())
+
+    return dict(per_id=per_id, bins=bin_starts, load=load_pct,
+               load_avg=float(load_pct.mean()), load_peak=float(load_pct.max()))
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -682,18 +624,14 @@ PALETTE = ["#d98a00", "#0e9bb8", "#b5259e", "#2aa14a",
            "#1f77d8", "#e8433d", "#7b5cff", "#8a8f00"]
 
 
-def _thin(t, v, max_n=6000):
+def _decimate(t, v, max_n=6000):
     if len(t) <= max_n:
         return t, v
     step = int(np.ceil(len(t) / max_n))
     return t[::step], v[::step]
 
 
-def render_signal_plots(series, outdir, t0, show=False):
-    """Render one PNG per signal in `series`, plus overlay PNGs. `series`
-    should already be restricted to whatever the caller wants charted —
-    Summary/Merged sheets are populated from the full decoded set elsewhere,
-    independently of what gets charted here."""
+def make_plots(series, outdir, t0, show=False):
     try:
         import matplotlib
         if not show:
@@ -710,7 +648,7 @@ def render_signal_plots(series, outdir, t0, show=False):
     # one graph per signal
     for s in tqdm(series, desc="Plotting", unit="sig"):
         col = PALETTE[len(paths) % len(PALETTE)]
-        t, v = _thin(s["t"] - t0, s["v"])
+        t, v = _decimate(s["t"] - t0, s["v"])
         fig, ax = plt.subplots(figsize=(9, 3.2), dpi=110)
         ax.plot(t, v, color=col, lw=1.1)
         st = stats(s["v"])
@@ -733,6 +671,7 @@ def render_signal_plots(series, outdir, t0, show=False):
     # overlay (independent y-axes, up to first 6 signals) + normalized overlay
     overlay = series[:6]
     if len(overlay) >= 2:
+        # raw overlay with twin axes
         fig, ax0 = plt.subplots(figsize=(11, 4.2), dpi=110)
         axes = [ax0]
         for i, s in enumerate(overlay):
@@ -740,7 +679,7 @@ def render_signal_plots(series, outdir, t0, show=False):
             if i >= 2:
                 ax.spines["right"].set_position(("outward", 46 * (i - 1)))
             col = PALETTE[i % len(PALETTE)]
-            t, v = _thin(s["t"] - t0, s["v"])
+            t, v = _decimate(s["t"] - t0, s["v"])
             ax.plot(t, v, color=col, lw=1.1,
                     label=s["name"] + (f" [{s['unit']}]" if s["unit"] else ""))
             ax.set_ylabel(s["unit"] or s["name"], color=col, fontsize=9)
@@ -755,12 +694,14 @@ def render_signal_plots(series, outdir, t0, show=False):
         p = os.path.join(plotdir, "_overlay.png")
         fig.savefig(p); plt.close(fig); paths.append(p)
 
+        # normalized overlay (shape comparison)
         fig, ax = plt.subplots(figsize=(11, 4.2), dpi=110)
         for i, s in enumerate(overlay):
             col = PALETTE[i % len(PALETTE)]
-            t, v = _thin(s["t"] - t0, s["v"])
+            t, v = _decimate(s["t"] - t0, s["v"])
             rng = (v.max() - v.min()) or 1.0
-            ax.plot(t, (v - v.min()) / rng, color=col, lw=1.1, label=s["name"])
+            ax.plot(t, (v - v.min()) / rng, color=col, lw=1.1,
+                    label=s["name"])
         ax.set_xlabel("t (s)"); ax.set_ylabel("normalized 0–1")
         ax.set_title("Signal overlay (normalized)", fontsize=11, fontweight="bold")
         ax.grid(True, alpha=0.25); ax.legend(fontsize=8, loc="upper right")
@@ -770,10 +711,11 @@ def render_signal_plots(series, outdir, t0, show=False):
 
     if show:
         import matplotlib.pyplot as plt
+        # re-show a lightweight overlay interactively
         if len(overlay) >= 2:
             plt.figure(figsize=(11, 4.5))
             for i, s in enumerate(overlay):
-                t, v = _thin(s["t"] - t0, s["v"])
+                t, v = _decimate(s["t"] - t0, s["v"])
                 rng = (v.max() - v.min()) or 1.0
                 plt.plot(t, (v - v.min()) / rng, lw=1.1, label=s["name"],
                          color=PALETTE[i % len(PALETTE)])
@@ -783,45 +725,10 @@ def render_signal_plots(series, outdir, t0, show=False):
     return paths
 
 
-def render_bus_load_chart(load_ts, outdir, baudrate, show=False):
-    """Bus-load-over-time PNG for the Bus Health sheet. Returns the path, or
-    None if matplotlib is unavailable or there's nothing to plot."""
-    bin_starts, load_pct = load_ts
-    if len(bin_starts) == 0:
-        return None
-    try:
-        import matplotlib
-        if not show:
-            matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-    except ImportError:
-        return None
-
-    plotdir = os.path.join(outdir, "plots")
-    os.makedirs(plotdir, exist_ok=True)
-    fig, ax = plt.subplots(figsize=(9, 3.2), dpi=110)
-    ax.plot(bin_starts, load_pct, color="#d9483b", lw=1.2)
-    ax.fill_between(bin_starts, load_pct, color="#d9483b", alpha=0.12)
-    ax.axhline(float(load_pct.mean()), color="#555", lw=0.8, ls="--")
-    ax.set_xlabel("t (s)", fontsize=9)
-    ax.set_ylabel("Bus load (%, est.)", fontsize=9)
-    ax.set_title(f"Bus load over time — estimated at {baudrate/1000:.0f} kbit/s",
-                fontsize=11, fontweight="bold")
-    ax.grid(True, alpha=0.25)
-    fig.tight_layout()
-    p = os.path.join(plotdir, "_bus_load.png")
-    fig.savefig(p)
-    if not show:
-        plt.close(fig)
-    return p
-
-
 # ════════════════════════════════════════════════════════════════════════════
-#  Excel export — Log Info / Summary / CAN Frames / Merged / Charts
-#  (no per-signal sheets — every decoded signal lives as one column in the
-#   Merged sheet instead; Charts only embeds the signals you asked to plot)
+#  Excel export
 # ════════════════════════════════════════════════════════════════════════════
-def _unique_sheet_name(name, used):
+def _safe_sheet(name, used):
     n = re.sub(r"[:\\/?*\[\]]", " ", name).strip()[:31] or "Signal"
     out, i = n, 2
     while out.lower() in used:
@@ -831,20 +738,28 @@ def _unique_sheet_name(name, used):
     return out
 
 
-def write_report(path, meta, dbc_names, series, frames, frame_name_by_id,
-                 tol, plot_paths, t0, sections=None, progress=None, bus_health=None):
+def export_excel(path, meta, dbc_names, series, frames, frame_name_by_id,
+                 tol, plot_paths, t0, sections=None, dynamics=None, faults=None,
+                 progress=None, components=None, dyn_chart=None, bus_health=None):
     """
-    series   : every decoded signal — feeds Log Info / Summary / Merged.
-    plot_paths : PNGs already rendered for whichever signals should appear
-               on the Charts sheet (a subset of `series`, chosen by the
-               caller — see --signals on the CLI).
-    sections : optional set of {'summary','frames','merged','charts','bus_health'}
+    sections : optional set of {'summary','frames','merged',
+               'charts','dynamics','faults','components','bus_health'}
                controlling which sheets are written (Log Info is always
-               included).
-    bus_health : optional dict from analyze_bus_health() plus 'errors' (list
-               from open_trace), 'baudrate', 'stuff_factor', 'chart' (PNG path)
-               -> written to a 'Bus Health' sheet.
+               included). The Merged sheet carries every signal in `series`
+               (typically the full decoded DBC set); there are no more
+               per-signal sheets.
+    dynamics : optional list of (metric, value, unit) rows -> 'Vehicle Dynamics'.
+    dyn_chart : optional path to a PNG (power / cumulative energy over time)
+               embedded alongside the Vehicle Dynamics table.
+    faults   : optional list of fault-episode rows -> 'Faults'.
+    components : optional list of (component, signal, unit, n, min, max, mean,
+               std) rows -> 'Components' (written when 'components' in sections).
+    bus_health : optional dict as returned by analyze_bus_health(), plus a
+               'baudrate' key (the bit rate it was computed with) and an
+               optional 'chart' key (path to a bus-load-over-time PNG) ->
+               'Bus Health' (written when 'bus_health' in sections).
     progress : optional callable(fraction: float, label: str) for UI progress.
+    meta may also carry 'vin', 'payload', 'description' for the header.
     """
     def _p(frac, label=""):
         if progress:
@@ -862,7 +777,7 @@ def write_report(path, meta, dbc_names, series, frames, frame_name_by_id,
         return None
 
     if sections is None:
-        sections = {"summary", "frames", "merged", "charts", "bus_health"}
+        sections = {"summary", "frames", "merged", "charts"}
     bold = Font(bold=True)
     _p(0.02, "Writing header…")
 
@@ -871,8 +786,13 @@ def write_report(path, meta, dbc_names, series, frames, frame_name_by_id,
 
     # Log Info (always)
     ws = wb.active
-    ws.title = _unique_sheet_name("Log Info", used)
-    info = [
+    ws.title = _safe_sheet("Log Info", used)
+    info = []
+    if meta.get("vin"):
+        info.append(("VIN", meta["vin"]))
+    if meta.get("payload") not in (None, ""):
+        info.append(("Payload (load body)", meta["payload"]))
+    info += [
         ("Format", meta["format"]), ("Version", meta["version"]),
         ("Date", meta["date"]), ("Start time", meta["start"]),
         ("End time", meta["end"]), ("Duration", meta["duration"]),
@@ -882,8 +802,9 @@ def write_report(path, meta, dbc_names, series, frames, frame_name_by_id,
         ("Message IDs matched",
          ", ".join(sorted({f"0x{s['msg_id']:X}" for s in series}))),
         ("Signals decoded", len(series)),
-        ("Generated by", f"CANDecode v{__version__} (open source)"),
     ]
+    if meta.get("description"):
+        info.append(("Description", meta["description"]))
     for k, v in info:
         ws.append([k, v])
     for row in ws.iter_rows(min_col=1, max_col=1):
@@ -891,96 +812,98 @@ def write_report(path, meta, dbc_names, series, frames, frame_name_by_id,
     ws.column_dimensions["A"].width = 22
     ws.column_dimensions["B"].width = 46
 
-    # Bus Health — per-ID frequency/jitter/dropout, estimated bus load, errors
+    # Bus Health (per-ID timing is exact; bus load % is an estimate)
     if bus_health and "bus_health" in sections:
-        ws = wb.create_sheet(_unique_sheet_name("Bus Health", used))
-        errors = bus_health.get("errors") or []
-        err_types = {}
-        for e in errors:
-            err_types[e["kind"]] = err_types.get(e["kind"], 0) + 1
-
-        warn_font = Font(bold=True, color="FFCC0000")
-        r = 1
-        for w in (bus_health.get("baudrate_mismatch"), bus_health.get("overload_warning")):
-            if w:
-                ws.cell(row=r, column=1, value=f"⚠ {w}").font = warn_font
-                ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=8)
-                r += 1
-        if r > 1:
-            r += 1
-
-        summary = [
-            ("Baud rate assumed", f"{bus_health['baudrate']/1000:.0f} kbit/s"),
-        ]
-        if bus_health.get("dbc_baudrate"):
-            summary.append(("Baud rate declared by DBC (BS_:)", f"{bus_health['dbc_baudrate']/1000:.0f} kbit/s"))
-        summary += [
-            ("Bit-stuffing factor assumed", f"{bus_health['stuff_factor']:.2f}x"),
+        ws = wb.create_sheet(_safe_sheet("Bus Health", used))
+        baudrate = bus_health.get("baudrate", 500000.0)
+        overload = bus_health["load_peak"] > 100.0
+        if overload:
+            ws.append([f"⚠ Estimated peak bus load is {bus_health['load_peak']:.0f}%, which is "
+                       f"impossible on a real bus — the assumed bit rate is very likely too low."])
+            ws[f"A{ws.max_row}"].font = Font(bold=True, color="CC0000")
+        summary_rows = [
+            ("Bit rate assumed", f"{baudrate/1000:.0f} kbit/s"),
             ("Average bus load (est.)", f"{bus_health['load_avg']:.2f} %"),
             ("Peak bus load (est.)", f"{bus_health['load_peak']:.2f} %"),
             ("Unique message IDs seen", len(bus_health["per_id"])),
-            ("Total error frames", len(errors)),
         ]
-        for k, v in summary:
-            ws.cell(row=r, column=1, value=k).font = bold
-            cell = ws.cell(row=r, column=2, value=v)
-            if bus_health.get("overload_warning") and k == "Peak bus load (est.)":
-                cell.font = warn_font
-            r += 1
-        r += 1
-
-        ws.cell(row=r, column=1, value="Error CanFrame Types").font = bold
-        r += 1
-        ws.cell(row=r, column=1, value="Type").font = bold
-        ws.cell(row=r, column=2, value="Count").font = bold
-        r += 1
-        if err_types:
-            for kind, n in sorted(err_types.items(), key=lambda kv: -kv[1]):
-                ws.cell(row=r, column=1, value=kind)
-                ws.cell(row=r, column=2, value=n)
-                r += 1
-        else:
-            ws.cell(row=r, column=1, value="none detected in this trace")
-            r += 1
-        r += 1
-
-        ws.cell(row=r, column=1, value="Per-Message-ID Timing").font = bold
-        r += 1
-        hdr = ["CAN_ID", "Message", "Count", "Freq (Hz)", "Avg gap (ms)",
-               "Std gap (ms)", "Max gap (ms)", "Dropout?"]
-        for c, h in enumerate(hdr, start=1):
-            ws.cell(row=r, column=c, value=h).font = bold
-        r += 1
-        for row_d in bus_health["per_id"]:
-            ws.append([f"0x{row_d['id']:X}", row_d["name"], row_d["count"],
-                       round(row_d["hz"], 3), round(row_d["avg_gap_ms"], 2),
-                       round(row_d["std_gap_ms"], 2), round(row_d["max_gap_ms"], 2),
-                       "YES" if row_d["dropout"] else ""])
+        for label, value in summary_rows:
+            ws.append([label, value])
+            ws[f"A{ws.max_row}"].font = bold
+        ws.append([])
+        ws.append(["Bus load % — how it's calculated"])
+        ws[f"A{ws.max_row}"].font = bold
+        for line in BUS_LOAD_FORMULA.split("\n"):
+            ws.append([line])
+        ws.append([])
+        ws.append(["Per-Message-ID Timing"])
+        ws[f"A{ws.max_row}"].font = bold
+        ws.append(["CAN_ID", "Message", "Count", "Freq (Hz)", "Avg gap (ms)",
+                   "Std gap (ms)", "Max gap (ms)", "Dropout?"])
+        for cell in ws[ws.max_row]:
+            cell.font = bold
+        for r in bus_health["per_id"]:
+            ws.append([f"0x{r['id']:X}", r["name"], r["count"],
+                       round(r["hz"], 3), round(r["avg_gap_ms"], 2),
+                       round(r["std_gap_ms"], 2), round(r["max_gap_ms"], 2),
+                       "YES" if r["dropout"] else ""])
         for col, w in zip("ABCDEFGH", (12, 24, 10, 11, 13, 13, 13, 10)):
             ws.column_dimensions[col].width = w
-
-        if errors:
-            r = ws.max_row + 2
-            ws.cell(row=r, column=1, value="Error CanFrame Log").font = bold
-            r += 1
-            for c, h in enumerate(["Time_s", "Type", "Raw line"], start=1):
-                ws.cell(row=r, column=c, value=h).font = bold
-            r += 1
-            for e in errors[:5000]:
-                ws.append([round(e["t"] - t0, 4), e["kind"], e["raw"]])
-
-        chart = bus_health.get("chart")
-        if chart and os.path.exists(chart):
+        bus_chart = bus_health.get("chart")
+        if bus_chart and os.path.exists(bus_chart):
             try:
-                img = XLImage(chart)
-                img.width, img.height = 640, 228
+                img = XLImage(bus_chart)
+                img.width, img.height = 680, 260
                 ws.add_image(img, "J2")
             except Exception:
                 pass
 
-    # Summary — every decoded signal
+    # Vehicle Dynamics
+    if dynamics and "dynamics" in sections:
+        ws = wb.create_sheet(_safe_sheet("Vehicle Dynamics", used))
+        ws.append(["Metric", "Value", "Unit"])
+        for cell in ws[1]:
+            cell.font = bold
+        for metric, value, unit in dynamics:
+            ws.append([metric, value, unit])
+        ws.column_dimensions["A"].width = 32
+        ws.column_dimensions["B"].width = 16
+        ws.column_dimensions["C"].width = 10
+        if dyn_chart and os.path.exists(dyn_chart):
+            try:
+                img = XLImage(dyn_chart)
+                img.width, img.height = 680, 300
+                ws.add_image(img, "E2")
+            except Exception:
+                pass
+
+    # Components (per-subsystem signal summary)
+    if components and "components" in sections:
+        ws = wb.create_sheet(_safe_sheet("Components", used))
+        ws.append(["Component", "Signal", "Unit", "Samples",
+                   "Min", "Max", "Mean", "Std Dev"])
+        for cell in ws[1]:
+            cell.font = bold
+        for r in components:
+            ws.append(list(r))
+        for col, w in zip("ABCDEFGH", (14, 26, 10, 10, 12, 12, 12, 12)):
+            ws.column_dimensions[col].width = w
+
+    # Faults (accumulated fault episodes with start / end time)
+    if faults and "faults" in sections:
+        ws = wb.create_sheet(_safe_sheet("Faults", used))
+        ws.append(["Signal", "Code / value", "Start", "End",
+                   "Duration (s)", "Start t (s)", "End t (s)"])
+        for cell in ws[1]:
+            cell.font = bold
+        for r in faults:
+            ws.append(list(r))
+        for col, w in zip("ABCDEFG", (26, 14, 15, 15, 13, 12, 12)):
+            ws.column_dimensions[col].width = w
+
+    # Summary
     if "summary" in sections:
-        ws = wb.create_sheet(_unique_sheet_name("Summary", used))
+        ws = wb.create_sheet(_safe_sheet("Summary", used))
         ws.append(["Signal", "Unit", "Samples", "Min", "Max", "Mean", "Std Dev"])
         for cell in ws[1]:
             cell.font = bold
@@ -993,7 +916,7 @@ def write_report(path, meta, dbc_names, series, frames, frame_name_by_id,
     # CAN Frames (full raw trace)
     if "frames" in sections:
         _p(0.06, "Writing CAN frames…")
-        ws = wb.create_sheet(_unique_sheet_name("CAN Frames", used))
+        ws = wb.create_sheet(_safe_sheet("CAN Frames", used))
         ws.append(["Time_s", "Clock", "CAN_ID", "Type", "Message", "DLC",
                    "Data (hex)", "B0", "B1", "B2", "B3", "B4", "B5", "B6", "B7"])
         for cell in ws[1]:
@@ -1002,7 +925,7 @@ def write_report(path, meta, dbc_names, series, frames, frame_name_by_id,
         nf = max(1, len(frames))
         for idx, f in enumerate(tqdm(frames, desc="Excel: frames", unit="fr")):
             hexbytes = [f"{b:02X}" for b in f.data]
-            row = [round(f.t - ft0, 4), _seconds_to_clock(f.t), f"0x{f.id:X}",
+            row = [round(f.t - ft0, 4), _sec_to_clock(f.t), f"0x{f.id:X}",
                    "Ext" if f.extended else "Std",
                    frame_name_by_id.get(f.id, ""), f.dlc, " ".join(hexbytes)]
             row += hexbytes[:8] + [""] * (8 - len(hexbytes[:8]))
@@ -1010,12 +933,12 @@ def write_report(path, meta, dbc_names, series, frames, frame_name_by_id,
             if progress and idx % 3000 == 0:
                 _p(0.06 + 0.44 * idx / nf, "Writing CAN frames…")
 
-    # Merged (as-of, nearest within tol) — every decoded signal, one column each
+    # Merged (as-of, nearest within tol)
     if series and "merged" in sections:
         _p(0.52, "Writing merged sheet…")
         all_times = np.unique(np.round(
             np.concatenate([s["t"] - t0 for s in series]), 4))
-        ws = wb.create_sheet(_unique_sheet_name("Merged", used))
+        ws = wb.create_sheet(_safe_sheet("Merged", used))
         ncell = len(all_times) * len(series)
         if ncell > 1_500_000:
             ws.append([f"Merged sheet skipped: {len(all_times)} time points x "
@@ -1030,7 +953,7 @@ def write_report(path, meta, dbc_names, series, frames, frame_name_by_id,
                 cell.font = bold
             cols = []
             for s in tqdm(series, desc="Excel: merge", unit="sig"):
-                col = nearest_join(all_times, s["t"] - t0, s["v"], tol)
+                col = merge_asof_nearest(all_times, s["t"] - t0, s["v"], tol)
                 cols.append(col)
             cols = np.array(cols)                       # (nsig, ntimes)
             nt = max(1, len(all_times))
@@ -1043,11 +966,11 @@ def write_report(path, meta, dbc_names, series, frames, frame_name_by_id,
                 if progress and i % 4000 == 0:
                     _p(0.55 + 0.15 * i / nt, "Writing merged sheet…")
 
-    # Charts sheet — embed only the PNGs the caller asked to be plotted
+    # Charts sheet — embed the per-signal PNGs
     single = [p for p in plot_paths if not os.path.basename(p).startswith("_")]
     if single and "charts" in sections:
         _p(0.92, "Embedding charts…")
-        ws = wb.create_sheet(_unique_sheet_name("Charts", used))
+        ws = wb.create_sheet(_safe_sheet("Charts", used))
         r = 1
         for p in single:
             try:
@@ -1074,7 +997,7 @@ def interactive_setup(args):
     file-picker dialogs first, then falls back to typed paths.
     """
     print("No files given on the command line — entering interactive mode.\n"
-          "  (tip: you can also run it as:  python candecode.py "
+          "  (tip: you can also run it as:  python can_log_analyzer.py "
           "--dbc a.dbc --log trace.csv --out ./out)\n")
 
     dbc, log, out = args.dbc, args.log, args.out
@@ -1094,11 +1017,11 @@ def interactive_setup(args):
             dbc = list(picked)
         if not log:
             log = filedialog.askopenfilename(
-                title="Select CAN log  (BUSMASTER .log/.asc  or  quoted CSV)",
+                title="Select CAN log  (BUSMASTER .log/.asc  or  MiniMon .csv)",
                 filetypes=[("CAN logs", "*.log *.asc *.csv *.txt"), ("All files", "*.*")])
         if not out:
             chosen = filedialog.askdirectory(
-                title="Select output folder  (Cancel = ./candecode_out next to the log)")
+                title="Select output folder  (Cancel = ./can_out next to the log)")
             out = chosen or None
         root.destroy()
     except Exception:
@@ -1111,12 +1034,14 @@ def interactive_setup(args):
         if not log:
             log = input("Path to CAN log file: ").strip().strip('"')
         if not out:
-            o = input("Output folder [./candecode_out]: ").strip().strip('"')
+            o = input("Output folder [./can_out]: ").strip().strip('"')
             out = o or None
 
+    # default output next to the log if still unset
     if not out:
-        out = os.path.join(os.path.dirname(os.path.abspath(log)) if log else ".", "candecode_out")
+        out = os.path.join(os.path.dirname(os.path.abspath(log)) if log else ".", "can_out")
 
+    # optional trim / signal filter, only prompted interactively
     if args.start is None and args.end is None:
         try:
             print("\nOptional trim — press Enter to skip.")
@@ -1136,15 +1061,13 @@ def interactive_setup(args):
 
 def main():
     ap = argparse.ArgumentParser(
-        description="CANDecode — DBC-guided CAN log decoder (open source).",
+        description="DBC-guided CAN log decoder (BUSMASTER + IXXAT MiniMon).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     ap.add_argument("--dbc", nargs="+", default=None, help="one or more .dbc files (max 10)")
-    ap.add_argument("--log", default=None, help="BUSMASTER .log/.asc or quoted CSV trace")
-    ap.add_argument("--out", default=None, help="output directory (default ./candecode_out)")
+    ap.add_argument("--log", default=None, help="BUSMASTER .log/.asc or MiniMon .csv")
+    ap.add_argument("--out", default=None, help="output directory (default ./can_out)")
     ap.add_argument("--signals", nargs="*", default=None,
-                    help="only chart/plot these signal names (default: all decoded "
-                         "signals are charted). Summary/Merged always cover every "
-                         "decoded signal regardless of this flag.")
+                    help="only decode these signal names (default: all)")
     ap.add_argument("--tol", type=float, default=0.1,
                     help="merge tolerance in seconds for the Merged sheet")
     ap.add_argument("--start", default=None,
@@ -1153,23 +1076,12 @@ def main():
                     help="trim end — seconds from log start (e.g. 30) or clock time (e.g. 15:28:30)")
     ap.add_argument("--no-excel", action="store_true", help="skip the .xlsx export")
     ap.add_argument("--no-plots", action="store_true", help="skip PNG plots")
-    ap.add_argument("--no-frames", action="store_true", help="skip the raw CAN Frames sheet")
-    ap.add_argument("--no-bus-health", action="store_true",
-                    help="skip the Bus Health sheet (per-ID frequency/jitter, estimated "
-                         "bus load, error frame count)")
-    ap.add_argument("--baudrate", type=float, default=None,
-                    help="CAN bus bit rate, bit/s — used to estimate bus load %%. "
-                         "Default: read from the DBC's BS_: record if it declares "
-                         "one, else 500000")
-    ap.add_argument("--stuff-factor", type=float, default=1.1,
-                    help="average bit-stuffing inflation applied to the bus-load "
-                         "estimate (1.0 = none, 1.2 = worst case)")
     ap.add_argument("--show", action="store_true", help="also show an overlay interactively")
     ap.add_argument("--version", action="version",
-                    version=f"CANDecode {__version__}")
+                    version=f"can_log_analyzer {__version__}")
     args = ap.parse_args()
 
-    print(f"CANDecode  v{__version__}  (open source)")
+    print(f"CAN Log Analyzer  v{__version__}")
     print("=" * 46)
 
     interactive = not (args.dbc and args.log)
@@ -1181,73 +1093,34 @@ def main():
     if not args.log:
         sys.exit("No log file selected — nothing to decode.")
     if args.out is None:
-        args.out = "./candecode_out"
+        args.out = "./can_out"
 
     t_start = time.time()
     os.makedirs(args.out, exist_ok=True)
 
     print("Parsing DBC database(s)…")
-    messages = combine_databases(args.dbc)
+    messages = merge_dbcs(args.dbc)
     total_sigs = sum(len(m["signals"]) for m in messages)
-    print(f"  merged: {len(messages)} unique message(s), {total_sigs} signal(s)")
+    print(f"  merged: {len(messages)} unique message(s), {total_sigs} signal(s)\n")
 
     print(f"Loading log: {args.log}")
-    fmt, frames, counts, meta, errors = open_trace(args.log)
-    fmt_label = "Quoted CSV trace" if fmt == "csv" else "BUSMASTER"
+    fmt, frames, counts, meta = load_log(args.log)
+    fmt_label = "IXXAT MiniMon CSV" if fmt == "minimon" else "BUSMASTER"
     print(f"  detected format : {fmt_label}")
     if not frames:
         sys.exit("  no frames parsed — check the file / format.")
     print(f"  validation      : {len(frames)} frame(s) — "
-          f"{counts['std']} std, {counts['ext']} ext, {counts['malformed']} skipped, "
-          f"{len(errors)} error frame(s)")
+          f"{counts['std']} std, {counts['ext']} ext, {counts['malformed']} skipped")
     print(f"  date/duration   : {meta['date']}  |  {meta['duration']}")
     print(f"  window          : {meta['start']} -> {meta['end']}\n")
-
-    # Bus bit rate: an explicit --baudrate always wins; otherwise prefer what
-    # the log itself declares (ground truth for how it was actually captured)
-    # over the DBC's BS_: record (documented intent, which can be stale or
-    # not match this specific capture setup).
-    dbc_baudrate, dbc_baudrate_conflict = declared_bus_speed(args.dbc)
-    log_baudrate = meta.get("baudrate")
-    baudrate_explicit = args.baudrate is not None
-    if log_baudrate:
-        print(f"  Bus bit rate detected from log: {log_baudrate/1000:.0f} kbit/s")
-    elif dbc_baudrate:
-        note = "conflicting values across DBCs, using first" if dbc_baudrate_conflict else "BS_:"
-        print(f"  DBC declares bus speed: {dbc_baudrate/1000:.0f} kbit/s ({note})")
-    if not baudrate_explicit:
-        args.baudrate = log_baudrate or dbc_baudrate
-        if args.baudrate is None:
-            if interactive:
-                while args.baudrate is None:
-                    raw = input("  Bus bit rate wasn't found in the log or a DBC. "
-                                 "Enter it in bit/s (e.g. 500000, 250000, 125000): ").strip()
-                    try:
-                        v = float(raw)
-                        if v > 0:
-                            args.baudrate = v
-                    except ValueError:
-                        pass
-            else:
-                sys.exit("Bus bit rate wasn't found in the log header or a DBC's BS_: record — "
-                         "pass --baudrate explicitly (e.g. --baudrate 500000).")
-    baudrate_mismatch = None
-    reference_rate = log_baudrate or dbc_baudrate
-    if baudrate_explicit and reference_rate and abs(args.baudrate - reference_rate) > max(1.0, 0.01 * reference_rate):
-        source = "log" if log_baudrate else "DBC (BS_:)"
-        baudrate_mismatch = (f"The {source} declares {reference_rate/1000:.0f} kbit/s but this analysis "
-                             f"is using {args.baudrate/1000:.0f} kbit/s — bus-load numbers below "
-                             f"assume the wrong speed unless that's intentional.")
-        print(f"  WARNING: {baudrate_mismatch}")
-    print()
 
     # ── optional time trim (seconds from start, or clock time) ──────────────
     log_t0 = min(f.t for f in frames)
     trim_desc = "full log"
     if args.start is not None or args.end is not None:
         try:
-            rs = resolve_trim_value(args.start, log_t0)
-            re_ = resolve_trim_value(args.end, log_t0)
+            rs = parse_trim_value(args.start, log_t0)
+            re_ = parse_trim_value(args.end, log_t0)
         except ValueError:
             sys.exit("  invalid trim value — use seconds (e.g. 5) or clock time "
                      "(e.g. 15:27:00).")
@@ -1257,18 +1130,16 @@ def main():
             sys.exit(f"  invalid trim: end ({b:.3f}s) must be after start ({a:.3f}s).")
         before = len(frames)
         frames = [f for f in frames if a <= (f.t - log_t0) <= b]
-        errors = [e for e in errors if a <= (e["t"] - log_t0) <= b]
         if not frames:
             sys.exit(f"  trim window {a:.3f}-{b:.3f}s contains no frames.")
         trim_desc = (f"{a:.3f}-{b:.3f} s  "
-                     f"({_seconds_to_clock(log_t0 + a)}–{_seconds_to_clock(log_t0 + b)})")
+                     f"({_sec_to_clock(log_t0 + a)}–{_sec_to_clock(log_t0 + b)})")
         print(f"Trim window       : {trim_desc}  "
               f"({len(frames)} of {before} frames kept)\n")
     meta["trim"] = trim_desc
 
-    # decode EVERY signal the DBC(s) and log agree on — the --signals flag
-    # only narrows down what gets charted, further down
-    series, matched = build_signal_series(frames, messages, None)
+    wanted = set(args.signals) if args.signals else None
+    series, matched = decode_all(frames, messages, wanted)
     if not series:
         sys.exit("No signals decoded — no DBC message IDs present in the log"
                  + (" / trim window." if trim_desc != "full log" else "."))
@@ -1277,80 +1148,28 @@ def main():
     frame_name_by_id = {m["id"]: m["name"] for m in messages}
     t0 = log_t0   # keep seconds-from-log-start as the time origin, even after trimming
 
-    chart_series = series
-    if args.signals:
-        wanted = set(args.signals)
-        chart_series = [s for s in series if s["name"] in wanted]
-        if not chart_series:
-            print("  note: none of --signals matched a decoded signal — nothing will be charted.\n")
-
     plot_paths = []
     if not args.no_plots:
         print("Generating graphs…")
-        plot_paths = render_signal_plots(chart_series, args.out, t0, show=args.show)
+        plot_paths = make_plots(series, args.out, t0, show=args.show)
         if plot_paths:
             print(f"  wrote {len([p for p in plot_paths if not os.path.basename(p).startswith('_')])} "
                   f"signal graph(s) + overlays to {os.path.join(args.out, 'plots')}\n")
 
-    bus_health = None
-    if not args.no_bus_health:
-        print("Analyzing bus load & health…")
-        per_id, load_ts, load_avg, load_peak = analyze_bus_health(
-            frames, meta["dur_sec"], frame_name_by_id,
-            baudrate=args.baudrate, stuff_factor=args.stuff_factor)
-        dropouts = sum(1 for r in per_id if r["dropout"])
-        print(f"  {len(per_id)} unique ID(s) — est. bus load avg {load_avg:.2f}% / "
-              f"peak {load_peak:.2f}%, {dropouts} ID(s) show a dropout-sized gap, "
-              f"{len(errors)} error frame(s)")
-        overload_warning = None
-        if load_peak > 100.0:
-            overload_warning = (f"Estimated peak bus load is {load_peak:.0f}%, which is impossible "
-                                f"on a real bus — the assumed baud rate ({args.baudrate/1000:.0f} "
-                                f"kbit/s) is very likely too low for this trace. Try --baudrate with "
-                                f"the next standard speed up (e.g. 250000, 500000, 1000000).")
-            print(f"  WARNING: {overload_warning}")
-        print()
-        bus_chart = None
-        if not args.no_plots:
-            bus_chart = render_bus_load_chart(load_ts, args.out, args.baudrate, show=args.show)
-        bus_health = dict(per_id=per_id, load_avg=load_avg, load_peak=load_peak,
-                          baudrate=args.baudrate, stuff_factor=args.stuff_factor,
-                          errors=errors, chart=bus_chart,
-                          dbc_baudrate=dbc_baudrate, baudrate_mismatch=baudrate_mismatch,
-                          overload_warning=overload_warning)
-
-    saved = None
     if not args.no_excel:
-        print("Writing Excel workbook…")
-        xlsx = os.path.join(args.out, os.path.splitext(os.path.basename(args.log))[0] + "_decoded.xlsx")
-        sections = {"summary", "merged", "charts"}
-        if not args.no_frames:
-            sections.add("frames")
-        if bus_health is not None:
-            sections.add("bus_health")
-        saved = write_report(xlsx, meta, [os.path.basename(p) for p in args.dbc],
-                             series, frames, frame_name_by_id, args.tol, plot_paths, t0,
-                             sections=sections, bus_health=bus_health)
+        print("Writing Excel report…")
+        xlsx = os.path.join(args.out, os.path.splitext(os.path.basename(args.log))[0] + "_report.xlsx")
+        saved = export_excel(xlsx, meta, [os.path.basename(p) for p in args.dbc],
+                             series, frames, frame_name_by_id, args.tol, plot_paths, t0)
         if saved:
             size_mb = os.path.getsize(saved) / 1e6
             print(f"  saved {saved}  ({size_mb:.1f} MB)\n")
 
     print(f"Done in {time.time() - t_start:.1f}s.")
 
-    if interactive:
-        # No console in the windowed .exe to see any of the above in — give
-        # the double-click user a real on-screen summary instead.
-        lines = [f"Decoded {len(series)} signal(s) from {len(matched)} message ID(s)."]
-        if bus_health is not None:
-            lines.append(f"Est. bus load: avg {bus_health['load_avg']:.1f}%  /  peak {bus_health['load_peak']:.1f}%.")
-        if saved:
-            lines.append(f"Workbook: {saved}")
-        lines.append(f"Output folder: {args.out}")
-        _show_gui_message("showinfo", "CANDecode — done", "\n".join(lines))
-
 
 def _show_gui_message(kind, title, msg):
-    """Best-effort messagebox — there's no console in the windowed .exe, so
+    """Best-effort messagebox — there's no console in a windowed build, so
     without this a failure would just look like the app did nothing."""
     try:
         import tkinter as tk
@@ -1365,6 +1184,7 @@ def _show_gui_message(kind, title, msg):
 
 
 if __name__ == "__main__":
+    # interactive if the user didn't pass both --dbc and --log on the command line
     _flags = ("-h", "--help", "--version")
     _interactive = (("--dbc" not in sys.argv) or ("--log" not in sys.argv)) \
         and not any(f in sys.argv for f in _flags)
@@ -1374,15 +1194,17 @@ if __name__ == "__main__":
         if _interactive:
             if exc.code not in (0, None):
                 print(exc.code)
-                _show_gui_message("showerror", "CANDecode", str(exc.code))
+                _show_gui_message("showerror", "CAN Log Analyzer", str(exc.code))
         else:
             raise
-    except Exception as exc:
+    except Exception as exc:                # keep the console open to show the traceback
         import traceback
         traceback.print_exc()
         if _interactive:
-            _show_gui_message("showerror", "CANDecode — error", f"{type(exc).__name__}: {exc}")
+            _show_gui_message("showerror", "CAN Log Analyzer — error", f"{type(exc).__name__}: {exc}")
     finally:
+        # pause so a double-clicked window doesn't vanish — but only when we're
+        # actually attached to a console (never when piped / launched headless)
         if _interactive and sys.stdin and sys.stdin.isatty():
             try:
                 input("\nPress Enter to close…")
