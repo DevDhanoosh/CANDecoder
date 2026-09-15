@@ -96,7 +96,7 @@ except ImportError:                       # minimal drop-in if tqdm isn't presen
 MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
-__version__ = "2.1-interactive"
+__version__ = "3.0-candump"
 
 
 # ════════════════════════════════════════════════════════════════════════════

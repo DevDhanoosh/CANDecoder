@@ -3,11 +3,14 @@
 CAN Signal Bench — desktop GUI for can_log_analyzer.
 
 A graphical front-end mirroring the HTML tool, plus a Bus Health workspace
-(per-ID timing, estimated bus load %).
+(per-ID timing, estimated bus load %, and BUS-OFF/Power-OFF detection —
+silence across ALL CAN IDs longer than a configurable threshold).
 
-Load up to 10 DBCs and a CAN trace (BUSMASTER .log/.asc or IXXAT MiniMon .csv),
-tick the signals you want, browse stats and plots, trim by clock time or a drag
-on the plot, choose which sheets to export, and save a decoded .xlsx.
+Load up to 10 DBCs and a CAN trace (BUSMASTER .log/.asc, IXXAT MiniMon .csv,
+or candump/SocketCAN), tick signals in the CAN-ID checkbox tree, browse
+stats and plots (scroll to zoom, drag to pan, "Expand" for a bigger view),
+trim by clock time or a drag on the plot, choose which sheets to export,
+and save a decoded .xlsx.
 
 Reuses decode / parse / export logic from can_log_analyzer.py — keep both files
 in the SAME folder.

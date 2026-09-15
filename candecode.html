@@ -203,8 +203,10 @@
   .chartcard .ctitle-txt b{color:var(--ink); display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
   .chartcard .chart-tools{display:flex; gap:5px; flex-shrink:0;}
   .chartcard canvas{max-height:170px;}
-  .signal-current{font-family:var(--mono); font-size:23px; font-weight:800; margin:2px 0 8px; line-height:1.1;}
+  .signal-current{font-family:var(--mono); font-size:23px; font-weight:800; margin:2px 0 2px; line-height:1.1;}
   .signal-current small{font-size:11px; font-weight:600; color:var(--faint); margin-left:5px;}
+  .signal-stats{font-size:10.5px; font-family:var(--mono); color:var(--faint); margin:0 0 8px;}
+  .signal-stats b{color:var(--muted); font-weight:700;}
   .chart-tools{display:flex; gap:5px; align-items:center;}
   .chartblock{margin-top:6px;}
   .chartblock .ctitle{display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;}
@@ -224,6 +226,8 @@
   .overlay-controls select{background:var(--well); border:1px solid var(--line); color:var(--ink); padding:7px 8px; border-radius:3px; font-size:11.5px; min-width:150px; flex:1 1 150px;}
   .overlay-controls label{display:flex; align-items:center; gap:6px; font-size:11.5px; color:var(--muted); white-space:nowrap; cursor:pointer;}
   .overlay-controls input[type=checkbox]{accent-color:var(--accent); width:15px; height:15px; cursor:pointer;}
+  .overlay-stats{display:flex; flex-wrap:wrap; gap:14px; margin-top:8px; font-size:10.5px; font-family:var(--mono); color:var(--faint);}
+  .overlay-stats b{font-weight:700;}
 
   footer{margin-top:10px; padding-top:16px; border-top:1px solid var(--line-soft); color:var(--faint); font-size:11px; text-align:center; line-height:1.9;}
   footer b{color:var(--muted); font-family:var(--mono);}
@@ -273,12 +277,12 @@
     <a href="https://github.com/DevDhanoosh" target="_blank" rel="noopener">github.com/DevDhanoosh</a><br>
     <a href="https://www.linkedin.com/in/dhanoosh-b-754945199/" target="_blank" rel="noopener">LinkedIn</a><br>
     <a href="mailto:dhanoosh2001@gmail.com">dhanoosh2001@gmail.com</a><br>
-    MIT licensed · runs fully client-side
+    MIT licensed · 100% private
   </div>
 </aside>
 <main>
   <div class="topbar">
-    <span class="status-pill"><span class="led ok"></span>runs fully client-side · nothing leaves your browser</span>
+    <span class="status-pill"><span class="led ok"></span>Runs on your computer — your files never leave your device</span>
     <div class="theme-switch" id="themeSwitch">
       <button data-v="dark" class="active">◑ DARK</button>
       <button data-v="light">◐ LIGHT</button>
@@ -433,6 +437,7 @@
           <canvas id="overlayCanvas"></canvas>
         </div>
         <div class="chart-hint" id="overlayHint" style="display:none;">Scroll to zoom · drag to pan · pinch on touch</div>
+        <div class="overlay-stats" id="overlayStats"></div>
         <div class="empty" id="overlayEmpty">Pick 2–4 signals above, then Plot.</div>
       </div>
     </section>
@@ -544,6 +549,28 @@
         }
       }]
     });
+  }
+
+  // ── min/max/avg caption drawn in the bottom-right corner of a chart —
+  // same placement/format as the min/max/avg annotation on the Python
+  // tool's exported PNG plots. Pass captionText via a `$caption` property
+  // set on the Chart.js config's plugins.statsCaption option.
+  const statsCaptionPlugin = {
+    id: 'statsCaption',
+    afterDraw(chart, args, opts){
+      if(!opts || !opts.text) return;
+      const { ctx, chartArea } = chart;
+      ctx.save();
+      ctx.font = '10px ui-monospace, Consolas, monospace';
+      ctx.fillStyle = opts.color || '#888';
+      ctx.textAlign = 'right'; ctx.textBaseline = 'bottom';
+      ctx.fillText(opts.text, chartArea.right - 4, chartArea.bottom - 3);
+      ctx.restore();
+    }
+  };
+  function statsCaptionText(st, unit){
+    const u = unit ? ' '+unit : '';
+    return `min ${st.min.toFixed(3)}${u}   max ${st.max.toFixed(3)}${u}   avg ${st.mean.toFixed(3)}${u}`;
   }
 
   let dbcFiles = [];
@@ -1134,14 +1161,18 @@
   }
 
   function buildBusLoadChartConfig(health, tc){
+    const loadCaption = health.load.length
+      ? `min ${arrMin(health.load).toFixed(2)}%   max ${health.loadPeak.toFixed(2)}%   avg ${health.loadAvg.toFixed(2)}%` : '';
     return { type:'line',
       data:{ datasets:[{ data: health.bins.map((t,i)=>({x:t,y:health.load[i]})), borderColor:'#d9483b', backgroundColor:'#d9483b1f', fill:true, pointRadius:0, borderWidth:1.4, tension:0.15 }] },
       options:{ responsive:true, maintainAspectRatio:false, animation:false, parsing:false,
         plugins:{ legend:{ display:false },
           annotation:{ annotations: gapAnnotations(health.busOff, health.binsT0, tc.warn+'2e') },
-          zoom: zoomPluginOptions() },
+          zoom: zoomPluginOptions(),
+          statsCaption:{ text: loadCaption, color: tc.tick } },
         scales:{ x:{ type:'linear', min:0, max: arrMax(health.bins)||undefined, title:{display:true,text:'t (s)', color:tc.tick, font:{size:9}}, grid:{color:tc.grid}, ticks:{color:tc.tick, font:{size:9}} },
-                  y:{ title:{display:true,text:'load %', color:tc.tick, font:{size:9}}, grid:{color:tc.grid}, ticks:{color:tc.tick, font:{size:9}} } } } };
+                  y:{ title:{display:true,text:'load %', color:tc.tick, font:{size:9}}, grid:{color:tc.grid}, ticks:{color:tc.tick, font:{size:9}} } } },
+      plugins:[statsCaptionPlugin] };
   }
   // ── checkbox tree: one .can-group per CAN ID, signals nested inside ──
   function paintSignalChecklist(matched){
@@ -1306,13 +1337,16 @@
   });
 
   // ── stats table + charts (only for CHECKED signals) ─────
-  function buildSignalChartConfig(s, pts, colorHex, tc){
+  function buildSignalChartConfig(s, pts, colorHex, tc, fullPts){
+    const st = summarizeSeries(fullPts || pts);
     return { type:'line',
       data:{ datasets:[{ data: pts.map(p=>({x:+(p.t-logT0).toFixed(4), y:p.v})), borderColor:colorHex, backgroundColor:colorHex+'22', fill:true, pointRadius:0, borderWidth:1.4, tension:0.1 }] },
       options:{ responsive:true, maintainAspectRatio:false, animation:false, parsing:false,
-        plugins:{ legend:{ display:false }, zoom: zoomPluginOptions() },
+        plugins:{ legend:{ display:false }, zoom: zoomPluginOptions(),
+          statsCaption:{ text: statsCaptionText(st, s.unit), color: tc.tick } },
         scales:{ x:{ type:'linear', title:{display:true,text:'t (s)', color:tc.tick, font:{size:9}}, grid:{color:tc.grid}, ticks:{color:tc.tick, font:{size:9}} },
-                  y:{ grid:{color:tc.grid}, ticks:{color:tc.tick, font:{size:9}} } } } };
+                  y:{ grid:{color:tc.grid}, ticks:{color:tc.tick, font:{size:9}} } } },
+      plugins:[statsCaptionPlugin] };
   }
   function paintSelection(matched){
     const sel = activeSignals(matched);
@@ -1346,22 +1380,41 @@
       const pts = thin(fullPts, 2000);
       const col = palette[i % palette.length];
       const liveVal = fullPts[fullPts.length - 1].v;
+      const st = summarizeSeries(fullPts);
+      const u = escHtml(s.unit||'');
+      const fmtLive = v => v.toFixed(Math.abs(v) < 10 ? 3 : 1);
       const card = document.createElement('div');
       card.className = 'chartcard';
       card.innerHTML = `<div class="ctitle">
-          <div class="ctitle-txt"><b title="${escHtml(s.name)}">${escHtml(s.name)}</b>${escHtml(s.unit||'')}</div>
+          <div class="ctitle-txt"><b title="${escHtml(s.name)}">${escHtml(s.name)}</b>${u}</div>
           <div class="chart-tools">
             <button class="icon-btn" data-reset-zoom aria-label="Reset ${escHtml(s.name)} zoom" title="Reset zoom">⤺</button>
             <button class="icon-btn" data-expand aria-label="Expand ${escHtml(s.name)}" title="Expand chart">⛶</button>
           </div>
         </div>
-        <div class="signal-current" style="color:${col}">${liveVal.toFixed(Math.abs(liveVal)<10?3:1)}<small>${escHtml(s.unit||'')} · last in window</small></div>
+        <div class="signal-current" style="color:${col}"><span class="cv-num">${fmtLive(liveVal)}</span><small class="cv-cap">${u} · last in window</small></div>
+        <div class="signal-stats">min <b>${st.min.toFixed(3)}</b> · max <b>${st.max.toFixed(3)}</b> · avg <b>${st.mean.toFixed(3)}</b>${u?' '+u:''}</div>
         <canvas></canvas>`;
       chartsWrap.appendChild(card);
       const ctx = card.querySelector('canvas');
-      const chart = new Chart(ctx, buildSignalChartConfig(s, pts, col, tc));
-      chart.$meta = { title: s.name + (s.unit ? '  ['+s.unit+']' : ''), build: ()=> buildSignalChartConfig(s, thin(windowPoints(s.points), 4000), col, themeColors()) };
+      const chart = new Chart(ctx, buildSignalChartConfig(s, pts, col, tc, fullPts));
+      chart.$meta = { title: s.name + (s.unit ? '  ['+s.unit+']' : ''), build: ()=> buildSignalChartConfig(s, thin(windowPoints(s.points), 4000), col, themeColors(), windowPoints(s.points)) };
       charts.push(chart);
+
+      // follow the cursor: show the value at the nearest point instead of
+      // a fixed "last in window" reading, reverting on mouseleave
+      const numEl = card.querySelector('.cv-num'), capEl = card.querySelector('.cv-cap');
+      ctx.addEventListener('mousemove', evt=>{
+        const hits = chart.getElementsAtEventForMode(evt, 'nearest', { intersect:false, axis:'x' }, false);
+        if(!hits.length) return;
+        const dp = chart.data.datasets[hits[0].datasetIndex].data[hits[0].index];
+        numEl.textContent = fmtLive(dp.y);
+        capEl.textContent = `${u} · at t=${dp.x.toFixed(2)}s`;
+      });
+      ctx.addEventListener('mouseleave', ()=>{
+        numEl.textContent = fmtLive(liveVal);
+        capEl.textContent = `${u} · last in window`;
+      });
     });
   }
   chartsWrap.addEventListener('click', e=>{
@@ -1427,10 +1480,16 @@
     if(chosen.length < 2){
       overlayBlock.style.display = 'none'; overlayHint.style.display = 'none';
       overlayEmpty.style.display = ''; overlayEmpty.textContent = 'Pick 2–4 signals above, then Plot.';
+      $('overlayStats').innerHTML = '';
       return;
     }
     overlayBlock.style.display = ''; overlayHint.style.display = ''; overlayEmpty.style.display = 'none';
     overlayChart = new Chart(overlayCanvas, buildOverlayChartConfig(chosen, ovNormalize.checked, themeColors()));
+    $('overlayStats').innerHTML = chosen.map((s, i)=>{
+      const st = summarizeSeries(windowPoints(s.points));
+      const u = s.unit ? ' '+escHtml(s.unit) : '';
+      return `<span style="color:${palette[i % palette.length]}"><b>${escHtml(s.name)}</b> min ${st.min.toFixed(3)}${u} · max ${st.max.toFixed(3)}${u} · avg ${st.mean.toFixed(3)}${u}</span>`;
+    }).join('');
   }
   ovPlotBtn.addEventListener('click', drawOverlay);
   ovNormalize.addEventListener('change', drawOverlay);

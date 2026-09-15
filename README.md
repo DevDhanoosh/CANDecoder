@@ -1,22 +1,27 @@
 # CANDecode
 
-**Live tool:** [https://devdhanoosh.github.io/CANDecode/](https://devdhanoosh.github.io/CANDecoder/)
+**Live tool:** [https://devdhanoosh.github.io/CANDecoder/](https://devdhanoosh.github.io/CANDecoder/)
 
-Open-source, DBC-guided CAN bus log decoder, plotter, and Excel exporter.
+Open-source, DBC-guided CAN bus log decoder, plotter, bus-health analyzer, and
+Excel exporter.
 
-Give it one or more Vector **DBC** databases and a **CAN trace**, and it decodes
-every signal the two agree on, plots it, and exports a single tidy Excel
-workbook.
+Give it one or more Vector **DBC** databases and a **CAN trace**, and it
+decodes every signal the two agree on, charts it, checks bus health, and
+exports a tidy Excel workbook. Runs entirely on your own computer — no file
+is ever uploaded, no account, no server in the loop.
 
-Two independent ways to run it — pick whichever suits you:
+## Three ways to run it
 
-| | |
-|---|---|
-| **`candecode.py`** | A standalone Python script — command line, or launch it with no arguments for interactive file-picker dialogs. |
-| **`candecode.html`** | A single self-contained HTML page — open it in any modern browser, no install, no server, nothing leaves your machine. |
+| | Trace formats | Highlights |
+|---|---|---|
+| **`candecode.html`** (the live tool above) | BUSMASTER, quoted CSV, **candump/SocketCAN** | Sidebar dashboard, CAN-ID checkbox tree, chart zoom/pan/pinch + expand, radial bus-load gauges, min/max/avg on every chart, BUS-OFF/Power-OFF detection, a Custom Graph tool to overlay 2–4 signals |
+| **CAN Signal Bench** — `can_log_analyzer.py` + `can_log_analyzer_gui.py` (or the packaged `.exe`) | BUSMASTER, quoted CSV, **candump/SocketCAN** | Desktop GUI: CAN-ID checkbox tree, chart scroll-zoom/pan/expand, a Bus Health workspace with BUS-OFF/Power-OFF detection, trim by dragging on the plot |
+| **`candecode.py`** | BUSMASTER, quoted CSV | The original standalone CLI script — lightest option, opens file-picker dialogs if run with no arguments |
 
-Both implement the exact same decode logic independently, so pick whichever
-fits your workflow — there is no dependency between them.
+All three decode independently of each other — pick whichever fits your
+workflow. `candecode.py` predates the candump/SocketCAN and BUS-OFF/Power-OFF
+work added to the other two, so it doesn't have those yet; reach for
+`can_log_analyzer.py` if you want that on the command line.
 
 ## What it decodes
 
@@ -27,35 +32,47 @@ fits your workflow — there is no dependency between them.
   - **BUSMASTER** ASCII log (`.log` / `.asc` / `.txt`)
   - **Quoted CSV trace** (`.csv`) — a header row starting `Time,...` followed
     by rows of `"HH:MM:SS.ffffff","<ID hex>","Std/Ext","<DLC>","<hex bytes>"`
+    (MiniMon-compatible)
+  - **candump / SocketCAN** — *(candecode.html and CAN Signal Bench)* — both
+    the `candump -l` log format (`(1699887726.123456) can0 123#DEADBEEF`) and
+    the live/`-t`-timestamped console format (`can0  123   [8]  11 22 ...`).
+    Handles extended IDs, remote frames, and basic CAN FD.
 
-## What it exports
+## Signal selection and charts
 
-One `.xlsx` workbook with:
+- **CAN-ID checkbox tree** *(candecode.html, CAN Signal Bench)* — signals are
+  grouped under their CAN ID; tick the ID to select/deselect every signal
+  under it at once, with a proper indeterminate state when only some are
+  ticked.
+- **Zoom, pan, expand** *(candecode.html, CAN Signal Bench)* — scroll to
+  zoom, drag to pan, pinch on touch (browser only), and an "expand" button
+  pops any chart into a bigger view with its own controls.
+- **Min / max / avg on every chart** *(candecode.html)* — drawn directly on
+  the chart, the same way the PNG plots exported by the Python tools already
+  caption theirs.
+- **Custom Graph** *(candecode.html)* — overlay 2–4 signals on one chart,
+  either on independent y-axes or normalized 0–1 to compare shape regardless
+  of units. Mirrors CAN Signal Bench's Overlay tab.
+- **Radial bus-load gauges and KPI widgets** *(candecode.html)* — average and
+  peak bus load shown as speedometer-style gauges; frame count, error count,
+  and BUS-OFF count shown as widget tiles instead of a plain table cell.
 
-- **Log Info** — format, date/time window, duration, DBC files used, message
-  IDs matched, signal count.
-- **Summary** — min/max/mean/std for **every** decoded signal.
-- **CAN Frames** — the full raw trace, one row per frame.
-- **Merged** — every decoded signal time-aligned onto one shared timeline
-  (nearest-value join within a configurable tolerance), one column per
-  signal. This always covers the full decoded set, independent of what
-  you've ticked for charting.
-- **Charts** — embedded plots for only the signals you ticked / requested.
-- **Bus Health** — per-message-ID frequency (Hz), inter-frame gap
-  mean/std/max, dropout flags, an estimated bus-load-over-time chart, and
-  error-frame counts (see below).
-
-There are no per-signal sheets — with dozens or hundreds of signals in a
-DBC, one sheet per signal stops being useful; the Merged sheet is the
-column-per-signal alternative.
-
-## Bus load & error frames — what's real vs. estimated
+## Bus health, including BUS-OFF / Power-OFF
 
 - **Per-ID timing** (frequency, gap mean/std/max, dropout flag) is computed
   directly from the frame timestamps in your trace, so it's exact. A
   "dropout" flag means that ID's longest gap was more than 3× its own
   median gap — i.e. something that normally arrives on a regular beat went
   quiet for a while.
+- **BUS-OFF / Power-OFF detection** *(candecode.html, CAN Signal Bench, and
+  `can_log_analyzer.py --bus-health`)* — flags any stretch where **no frame
+  of any CAN ID** was seen for longer than a configurable threshold (default
+  2.0s): the signature of the bus going off, or the logger/vehicle losing
+  power mid-capture. This is different from the per-ID dropout flag above,
+  which only fires when one ID goes quiet while the rest of the bus keeps
+  talking. Silence alone is a suspected interruption, not a confirmed one —
+  shown as a tile, an events table (start/end/duration), and shaded red
+  directly on the bus-load chart.
 - **Bus load %** is an *estimate*. A plain ASCII trace doesn't record the
   exact bit-stuffed length of each frame, so load is derived from the
   standard CAN frame overhead (arbitration/control/CRC/ACK/EOF/IFS) plus a
@@ -78,14 +95,60 @@ column-per-signal alternative.
   traces don't capture hardware-level error interrupts at all unless the
   tool was explicitly configured to log them.
 
-## Using the Python script
+## What it exports
+
+One `.xlsx` workbook with:
+
+- **Log Info** — format, date/time window, duration, DBC files used, message
+  IDs matched, signal count.
+- **Summary** — min/max/mean/std for **every** decoded signal.
+- **CAN Frames** — the full raw trace, one row per frame.
+- **Merged** — every decoded signal time-aligned onto one shared timeline
+  (nearest-value join within a configurable tolerance), one column per
+  signal. This always covers the full decoded set, independent of what
+  you've ticked for charting.
+- **Charts** — embedded plots for only the signals you ticked / requested.
+- **Bus Health** — per-message-ID frequency (Hz), inter-frame gap
+  mean/std/max, dropout flags, an estimated bus-load-over-time chart,
+  error-frame counts, and (candecode.html / CAN Signal Bench /
+  `can_log_analyzer.py --bus-health`) BUS-OFF/Power-OFF events.
+
+There are no per-signal sheets — with dozens or hundreds of signals in a
+DBC, one sheet per signal stops being useful; the Merged sheet is the
+column-per-signal alternative.
+
+## Using the HTML tool
+
+Open `candecode.html` (or the live site above) — a sidebar lists seven
+numbered stages: Source Files, Console, Signals Decoded, Stats, Bus Health,
+Charts, and Support. Drop in your DBC(s) and log, set the merge tolerance,
+bus bit rate, and BUS-OFF gap threshold, hit Decode, tick signals in the
+checkbox tree, then export.
+
+Everything — parsing, decoding, charting, workbook generation — runs
+locally in JavaScript (Chart.js + ExcelJS, loaded from a CDN); no file is
+ever uploaded anywhere.
+
+## Using CAN Signal Bench (desktop GUI)
 
 ```bash
-pip install numpy matplotlib openpyxl        # tqdm optional, for a nicer progress bar
+pip install numpy matplotlib openpyxl        # tqdm optional
+python can_log_analyzer_gui.py
+```
 
-python candecode.py --dbc vehicle.dbc --log trace.log --out ./out
-python candecode.py --dbc a.dbc b.dbc --log capture.csv --out ./out \
-    --signals MotorTorque PackCurrent --start 5 --end 120
+Load up to 10 DBCs and a trace (BUSMASTER, quoted CSV, or candump), tick
+signals in the CAN-ID checkbox tree, scroll/drag/expand charts, set a bit
+rate and BUS-OFF gap threshold in the Bus Health tab, trim by dragging on
+the plot, then export.
+
+## Using can_log_analyzer.py (CLI, with candump + BUS-OFF support)
+
+```bash
+pip install numpy matplotlib openpyxl        # tqdm optional
+
+python can_log_analyzer.py --dbc vehicle.dbc --log trace.log --out ./out
+python can_log_analyzer.py --dbc vehicle.dbc --log candump.log --out ./out \
+    --bus-health --baudrate 500000 --gap-threshold 2.0
 ```
 
 Run it with no arguments and it opens file-picker dialogs instead (falls
@@ -96,25 +159,30 @@ Key flags:
 | Flag | Meaning |
 |---|---|
 | `--dbc FILE [FILE ...]` | up to 10 `.dbc` files; first definition of a message ID wins |
-| `--log FILE` | the trace to decode |
+| `--log FILE` | the trace to decode (BUSMASTER, quoted CSV, or candump — auto-detected) |
 | `--signals NAME [NAME ...]` | restrict **charting** to these signals (Summary/Merged always cover everything) |
 | `--start` / `--end` | trim window — seconds from log start, or clock time `HH:MM:SS` |
 | `--tol` | merge tolerance (seconds) for the Merged sheet, default `0.1` |
+| `--bus-health` | add a Bus Health sheet: per-ID timing, bus load %, BUS-OFF/Power-OFF gaps |
 | `--baudrate` | CAN bus bit rate, bit/s — used for the bus-load estimate, default `500000` |
-| `--stuff-factor` | average bit-stuffing inflation for the bus-load estimate, default `1.1` |
-| `--no-plots` / `--no-excel` / `--no-frames` / `--no-bus-health` | skip PNGs / the workbook / the CAN Frames sheet / the Bus Health sheet |
+| `--gap-threshold` | seconds of silence across ALL IDs before flagging BUS-OFF/Power-OFF, default `2.0` |
+| `--no-plots` / `--no-excel` | skip PNGs / the workbook |
 | `--show` | also pop up an interactive overlay plot |
 
-## Using the HTML tool
+## Using candecode.py (original CLI script)
 
-Just open `candecode.html` in a browser — every section is laid out on one
-page, numbered `01`–`06`: Source Files / Console, Signals Decoded, Stats,
-Bus Health, and Charts. Drop in your DBC(s) and log, set the merge
-tolerance and bus bit rate, hit Decode, then tick the signals you want
-charted and export the `.xlsx`.
+```bash
+pip install numpy matplotlib openpyxl        # tqdm optional, for a nicer progress bar
 
-Everything — parsing, decoding, plotting, workbook generation — runs
-locally in JavaScript; no file is ever uploaded anywhere.
+python candecode.py --dbc vehicle.dbc --log trace.log --out ./out
+python candecode.py --dbc a.dbc b.dbc --log capture.csv --out ./out \
+    --signals MotorTorque PackCurrent --start 5 --end 120
+```
+
+Run it with no arguments and it opens file-picker dialogs instead. Same
+BUSMASTER/quoted-CSV-only format support as always; see `python
+candecode.py --help` for its flags (`--baudrate`, `--stuff-factor`,
+`--no-bus-health`, and the same trim/signal/export flags as above).
 
 ## Building a standalone .exe
 
@@ -124,15 +192,27 @@ No Python install needed for end users — build a single Windows executable:
 pip install pyinstaller
 pyinstaller --onefile --windowed --name CANDecode candecode.py
 # → dist/CANDecode.exe
+
+pyinstaller --onefile --windowed --name CANSignalBench can_log_analyzer_gui.py
+# → dist/CANSignalBench.exe
 ```
 
 `--windowed` builds it without a console window, so double-clicking opens
-straight into the file-picker dialogs instead of a black terminal — the
-script detects this and redirects its own console output, and shows a
-message box for the final summary and any errors instead.
+straight into the file-picker dialogs (or the GUI) instead of a black
+terminal — the scripts detect this and redirect their own console output,
+showing a message box for the final summary and any errors instead.
 
-`CANDecode.spec` (generated on first build) records the exact build config;
-re-run `pyinstaller CANDecode.spec` on later builds instead of retyping flags.
+`CANDecode.spec` / `CANSignalBench.spec` (generated on first build) record
+the exact build config; re-run `pyinstaller <name>.spec` on later builds
+instead of retyping flags.
+
+## Privacy
+
+Every version of this tool runs on your own machine. The HTML tool decodes
+entirely in your browser using JavaScript — your DBC and trace files are
+read locally and never sent anywhere. The Python scripts and the desktop
+GUI never open a network connection for decoding either. Nothing is
+uploaded, no account is needed, and no data leaves your computer.
 
 ## License
 
@@ -143,4 +223,5 @@ no proprietary or vendor DBC content bundled or referenced; bring your own.
 
 **Dhanoosh B**
 GitHub: [github.com/DevDhanoosh](https://github.com/DevDhanoosh)
+LinkedIn: [linkedin.com/in/dhanoosh-b-754945199](https://www.linkedin.com/in/dhanoosh-b-754945199/)
 Email: [dhanoosh2001@gmail.com](mailto:dhanoosh2001@gmail.com)
