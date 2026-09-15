@@ -2,9 +2,12 @@
 """
 CAN log analyzer — DBC-guided decode, validation, plots and Excel export.
 
-Supports two trace formats (auto-detected):
+Supports three trace formats (auto-detected):
   * BUSMASTER  ASCII log   (.log / .asc / .txt)
   * IXXAT MiniMon V3 CSV   (.csv)
+  * candump (Linux SocketCAN) — both the `candump -l` log format
+    ("(epoch) iface ID#DATA") and the live/`-t`-timestamped console
+    format ("iface  ID   [DLC]  b0 b1 ...").
 
 Decoding matches the Vector DBC convention: Intel (little-endian) and
 Motorola (big-endian, "sawtooth") bit layouts, with 2's-complement signed
@@ -183,11 +186,20 @@ def declared_log_baudrate(text_head):
     return None
 
 
+CANDUMP_LOG_RE = re.compile(
+    r'^\s*\(\s*(\d+(?:\.\d+)?)\s*\)\s+(\S+)\s+([0-9A-Fa-f]{3,8})(##?)([0-9A-Fa-f]*|[Rr]\d*)\s*$', re.M)
+CANDUMP_LIVE_RE = re.compile(
+    r'^\s*(?:\(\s*(\d+(?:\.\d+)?)\s*\)\s+)?(\S+)\s+([0-9A-Fa-f]{3,8})\s+\[(\d{1,2})\]\s*'
+    r'((?:[0-9A-Fa-f]{2}\s*)*)$', re.M)
+
+
 def detect_format(text_head):
     if re.search(r"IXXAT\s+MiniMon", text_head, re.I) or '"Identifier (hex)"' in text_head:
         return "minimon"
     if re.search(r"\bBUSMASTER\b", text_head, re.I):
         return "busmaster"
+    if CANDUMP_LOG_RE.search(text_head) or CANDUMP_LIVE_RE.search(text_head):
+        return "candump"
     # content sniff: quoted-CSV data rows => minimon
     if re.search(r'^\s*"[^"]*"\s*,\s*"[0-9A-Fa-f]+"', text_head, re.M):
         return "minimon"
@@ -294,6 +306,72 @@ def parse_minimon(text):
     return frames, dict(std=std, ext=ext, malformed=bad)
 
 
+def parse_candump(text):
+    """
+    Linux SocketCAN `candump` text — two sub-formats, both accepted line by
+    line (a capture can even mix them):
+      * `candump -l` log format   : (1699887726.123456) can0 18FEF100#0011223344556677
+        Remote frames              : (1699887726.123456) can0 123#R  or  123#R4
+        CAN FD frames (##)         : (1699887726.123456) can0 123##1DEADBEEF...
+      * live / `-t {a,d,z}` format: [(timestamp) ]can0  123   [8]  00 11 22 33 44 55 66 77
+    ID length decides Standard vs Extended, matching candump's own printing
+    convention: <=3 hex digits is an 11-bit Standard ID, else 29-bit Extended
+    (candump zero-pads Extended IDs out to 8 digits).
+    """
+    frames, std, ext, bad = [], 0, 0, 0
+    seq = 0.0
+    saw_any = saw_real_ts = False
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        m = CANDUMP_LOG_RE.match(line)
+        if m:
+            saw_any = True
+            ts_s, iface, idhex, sep, payload = m.groups()
+            t = float(ts_s)
+            saw_real_ts = True
+            extended = len(idhex) > 3
+            cid = int(idhex, 16)
+            if sep == "#" and payload[:1] in ("R", "r"):
+                dlc = int(payload[1:]) if payload[1:].isdigit() else 0
+                data = b""
+            else:
+                hexdata = payload[1:] if sep == "##" else payload   # ## carries a flags nibble first
+                if len(hexdata) % 2:
+                    bad += 1
+                    continue
+                data = bytes.fromhex(hexdata) if hexdata else b""
+                dlc = len(data)
+            std += not extended
+            ext += extended
+            frames.append(Frame(t, cid, dlc, data, extended))
+            continue
+        m = CANDUMP_LIVE_RE.match(line)
+        if m:
+            saw_any = True
+            ts_s, iface, idhex, dlc_s, bytestr = m.groups()
+            if ts_s is not None:
+                t = float(ts_s)
+                saw_real_ts = True
+            else:
+                t = seq
+                seq += 0.001                       # no timestamp column — keep frame order only
+            extended = len(idhex) > 3
+            cid = int(idhex, 16)
+            dlc = int(dlc_s)
+            data = bytes(int(b, 16) for b in bytestr.split()) if bytestr.strip() else b""
+            if len(data) < dlc:
+                bad += 1
+                continue
+            std += not extended
+            ext += extended
+            frames.append(Frame(t, cid, dlc, data[:dlc], extended))
+            continue
+        bad += 1
+    return frames, dict(std=std, ext=ext, malformed=bad, synthetic_time=(saw_any and not saw_real_ts))
+
+
 # ── metadata (date / start / end / duration) ────────────────────────────────
 def _fmt_date(raw, hint):
     parts = [p for p in re.split(r"[^0-9]+", raw) if p]
@@ -363,10 +441,16 @@ def parse_trim_value(val, log_t0):
     return float(val)
 
 
+FORMAT_LABELS = {"minimon": "IXXAT MiniMon", "busmaster": "BUSMASTER",
+                 "candump": "candump (SocketCAN)"}
+
+
 def build_meta(text, frames, fmt):
-    meta = dict(format="IXXAT MiniMon" if fmt == "minimon" else "BUSMASTER",
+    
+    meta = dict(format=FORMAT_LABELS.get(fmt, "BUSMASTER"),
                 version="—", date="—", start="—", end="—",
                 duration="—", dur_sec=0.0, frames=len(frames))
+    first = None
     if frames:
         ts = np.fromiter((f.t for f in frames), dtype=np.float64, count=len(frames))
         first, last = float(ts.min()), float(ts.max())
@@ -391,6 +475,14 @@ def build_meta(text, frames, fmt):
             meta["start"] = _to24(s.group(1))
         if e:
             meta["end"] = _to24(e.group(1))
+    elif fmt == "candump":
+        meta["version"] = "SocketCAN candump"
+        # candump timestamps are Unix epoch seconds (real calendar time), not
+        # seconds-since-midnight like the other two formats — recover an
+        # actual date from them when they look like a real epoch (post-2001).
+        if first is not None and first > 1e9:
+            gm = time.gmtime(first)
+            meta["date"] = f"{gm.tm_mday:02d} {MONTHS[gm.tm_mon - 1]} {gm.tm_year}  (UTC)"
     else:
         d = re.search(r"START DATE(?:\s+AND\s+TIME)?\s*[:\-]?\s*"
                       r"([0-9]{1,2}[:\-\/][0-9]{1,2}[:\-\/][0-9]{2,4})", text, re.I)
@@ -406,12 +498,18 @@ def load_log(path):
     with open(path, "r", errors="replace") as fh:
         text = fh.read()
     fmt = detect_format(text[:3000])
-    frames, counts = (parse_minimon if fmt == "minimon" else parse_busmaster)(text)
+    parser = dict(minimon=parse_minimon, candump=parse_candump).get(fmt, parse_busmaster)
+    frames, counts = parser(text)
     meta = build_meta(text, frames, fmt)
     # MiniMon CSVs do carry a "Baudrate:" header line, but as an opaque
     # controller register pair (e.g. "40 2B"), not a plain bit/s value — no
     # verified table to decode that safely, so only BUSMASTER is attempted.
     meta["baudrate"] = declared_log_baudrate(text[:4000]) if fmt == "busmaster" else None
+    if fmt == "candump" and counts.get("synthetic_time"):
+        meta["note"] = ("No timestamps found in this candump capture — frame order was kept "
+                        "but times are 1 ms apart and synthetic, so durations/rates/bus-load "
+                        "below are not meaningful. Capture with 'candump -l' or 'candump -t a' "
+                        "for real timestamps.")
     return fmt, frames, counts, meta
 
 
@@ -549,15 +647,42 @@ BUS_LOAD_FORMULA = (
     "rate matching the real bus."
 )
 _STUFF_FACTOR = 1.1
+_GAP_THRESHOLD_DEFAULT = 2.0
+
+
+def detect_bus_off_gaps(frames, threshold_sec=_GAP_THRESHOLD_DEFAULT):
+    """
+    Silent windows across the WHOLE trace (no frame of ANY ID) longer than
+    threshold_sec — the signature of a bus going off, or the logger/vehicle
+    losing power mid-capture, as opposed to a single ID dropping out while
+    the rest of the bus keeps talking (see the per-ID "dropout" flag for that).
+
+    Returns a list of dicts sorted by time: {start_t, end_t, duration,
+    start_clock, end_clock} — start_t/end_t are the timestamps of the last
+    frame before, and first frame after, the silence (same units as Frame.t).
+    """
+    if len(frames) < 2:
+        return []
+    ts = np.sort(np.fromiter((f.t for f in frames), float, len(frames)))
+    gaps = np.diff(ts)
+    events = []
+    for i in np.nonzero(gaps > threshold_sec)[0]:
+        start_t, end_t = float(ts[i]), float(ts[i + 1])
+        events.append(dict(start_t=start_t, end_t=end_t, duration=end_t - start_t,
+                           start_clock=_sec_to_clock(start_t), end_clock=_sec_to_clock(end_t)))
+    return events
 
 
 def analyze_bus_health(frames, dur_sec, frame_name_by_id, baudrate=500000.0,
-                       stuff_factor=_STUFF_FACTOR, window_sec=1.0, dropout_mult=3.0):
+                       stuff_factor=_STUFF_FACTOR, window_sec=1.0, dropout_mult=3.0,
+                       gap_threshold_sec=_GAP_THRESHOLD_DEFAULT):
     """
     Per-ID frame timing (exact, from frame timestamps) plus an estimated
-    bus-load-over-time (see BUS_LOAD_FORMULA for exactly how).
+    bus-load-over-time (see BUS_LOAD_FORMULA for exactly how), plus
+    whole-bus silence gaps (see detect_bus_off_gaps).
 
-    Returns dict(per_id, bins, load, load_avg, load_peak):
+    Returns dict(per_id, bins, load, load_avg, load_peak, bus_off,
+                 gap_threshold_sec, bins_t0):
       per_id : list of dicts sorted by frame count desc —
                {id, name, count, hz, avg_gap_ms, std_gap_ms, max_gap_ms, dropout}
                A "dropout" flag means that ID's longest gap was more than
@@ -565,10 +690,15 @@ def analyze_bus_health(frames, dur_sec, frame_name_by_id, baudrate=500000.0,
       bins, load : ndarrays, one point per window_sec bin — bin start (s
                from the first frame) and estimated load (%).
       load_avg, load_peak : float, percent.
+      bus_off : list of gaps (see detect_bus_off_gaps) — flag these as
+               BUS-OFF / Power-OFF in a report; bin/gap times share the same
+               origin (bins_t0), so a gap at start_t-bins_t0 lines up with
+               the bins x-axis directly.
     """
     if not frames or dur_sec <= 0:
         return dict(per_id=[], bins=np.array([]), load=np.array([]),
-                    load_avg=0.0, load_peak=0.0)
+                    load_avg=0.0, load_peak=0.0, bus_off=[],
+                    gap_threshold_sec=gap_threshold_sec, bins_t0=0.0)
 
     ts = np.fromiter((f.t for f in frames), float, len(frames))
     t0 = float(ts.min())
@@ -612,9 +742,11 @@ def analyze_bus_health(frames, dur_sec, frame_name_by_id, baudrate=500000.0,
     bin_durs[-1] = dur_sec - (n_bins - 1) * window_sec
     load_pct = bin_bits / (bin_durs * baudrate) * 100.0
     bin_starts = np.arange(n_bins) * window_sec
+    bus_off = detect_bus_off_gaps(frames, gap_threshold_sec)
 
     return dict(per_id=per_id, bins=bin_starts, load=load_pct,
-               load_avg=float(load_pct.mean()), load_peak=float(load_pct.max()))
+               load_avg=float(load_pct.mean()), load_peak=float(load_pct.max()),
+               bus_off=bus_off, gap_threshold_sec=gap_threshold_sec, bins_t0=t0)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -816,16 +948,23 @@ def export_excel(path, meta, dbc_names, series, frames, frame_name_by_id,
     if bus_health and "bus_health" in sections:
         ws = wb.create_sheet(_safe_sheet("Bus Health", used))
         baudrate = bus_health.get("baudrate", 500000.0)
+        bus_off = bus_health.get("bus_off") or []
+        gap_threshold = bus_health.get("gap_threshold_sec", _GAP_THRESHOLD_DEFAULT)
         overload = bus_health["load_peak"] > 100.0
         if overload:
             ws.append([f"⚠ Estimated peak bus load is {bus_health['load_peak']:.0f}%, which is "
                        f"impossible on a real bus — the assumed bit rate is very likely too low."])
+            ws[f"A{ws.max_row}"].font = Font(bold=True, color="CC0000")
+        if bus_off:
+            ws.append([f"⚠ {len(bus_off)} BUS-OFF / Power-OFF gap(s) detected — no frames of any "
+                       f"ID for longer than {gap_threshold:g}s. See the table below for exact times."])
             ws[f"A{ws.max_row}"].font = Font(bold=True, color="CC0000")
         summary_rows = [
             ("Bit rate assumed", f"{baudrate/1000:.0f} kbit/s"),
             ("Average bus load (est.)", f"{bus_health['load_avg']:.2f} %"),
             ("Peak bus load (est.)", f"{bus_health['load_peak']:.2f} %"),
             ("Unique message IDs seen", len(bus_health["per_id"])),
+            ("BUS-OFF / Power-OFF gaps", len(bus_off)),
         ]
         for label, value in summary_rows:
             ws.append([label, value])
@@ -849,6 +988,18 @@ def export_excel(path, meta, dbc_names, series, frames, frame_name_by_id,
                        "YES" if r["dropout"] else ""])
         for col, w in zip("ABCDEFGH", (12, 24, 10, 11, 13, 13, 13, 10)):
             ws.column_dimensions[col].width = w
+        ws.append([])
+        ws.append([f"BUS-OFF / Power-OFF Events  (no frames of any ID for > {gap_threshold:g} s)"])
+        ws[f"A{ws.max_row}"].font = bold
+        if bus_off:
+            ws.append(["Start", "End", "Duration (s)", "Start t (s)", "End t (s)"])
+            for cell in ws[ws.max_row]:
+                cell.font = bold
+            for g in bus_off:
+                ws.append([g["start_clock"], g["end_clock"], round(g["duration"], 3),
+                           round(g["start_t"], 3), round(g["end_t"], 3)])
+        else:
+            ws.append(["None detected — frames were present continuously throughout the trace."])
         bus_chart = bus_health.get("chart")
         if bus_chart and os.path.exists(bus_chart):
             try:
@@ -1077,6 +1228,14 @@ def main():
     ap.add_argument("--no-excel", action="store_true", help="skip the .xlsx export")
     ap.add_argument("--no-plots", action="store_true", help="skip PNG plots")
     ap.add_argument("--show", action="store_true", help="also show an overlay interactively")
+    ap.add_argument("--bus-health", action="store_true",
+                    help="add a Bus Health sheet: per-ID timing, bus load %%, "
+                         "and BUS-OFF/Power-OFF gaps (silence across all IDs)")
+    ap.add_argument("--baudrate", type=float, default=500000.0,
+                    help="assumed CAN bus bit rate (bit/s), used for the bus-load estimate "
+                         "(overridden by the log header when BUSMASTER recorded one)")
+    ap.add_argument("--gap-threshold", type=float, default=2.0,
+                    help="seconds with no frame of ANY ID before flagging BUS-OFF/Power-OFF")
     ap.add_argument("--version", action="version",
                     version=f"can_log_analyzer {__version__}")
     args = ap.parse_args()
@@ -1105,7 +1264,7 @@ def main():
 
     print(f"Loading log: {args.log}")
     fmt, frames, counts, meta = load_log(args.log)
-    fmt_label = "IXXAT MiniMon CSV" if fmt == "minimon" else "BUSMASTER"
+    fmt_label = {"minimon": "IXXAT MiniMon CSV", "candump": "candump (SocketCAN)"}.get(fmt, "BUSMASTER")
     print(f"  detected format : {fmt_label}")
     if not frames:
         sys.exit("  no frames parsed — check the file / format.")
@@ -1113,6 +1272,8 @@ def main():
           f"{counts['std']} std, {counts['ext']} ext, {counts['malformed']} skipped")
     print(f"  date/duration   : {meta['date']}  |  {meta['duration']}")
     print(f"  window          : {meta['start']} -> {meta['end']}\n")
+    if meta.get("note"):
+        print(f"  note: {meta['note']}\n")
 
     # ── optional time trim (seconds from start, or clock time) ──────────────
     log_t0 = min(f.t for f in frames)
@@ -1148,6 +1309,23 @@ def main():
     frame_name_by_id = {m["id"]: m["name"] for m in messages}
     t0 = log_t0   # keep seconds-from-log-start as the time origin, even after trimming
 
+    bus_health = None
+    if args.bus_health:
+        baud = meta.get("baudrate") or args.baudrate
+        bus_health = analyze_bus_health(frames, meta["dur_sec"], frame_name_by_id,
+                                        baudrate=baud, gap_threshold_sec=args.gap_threshold)
+        bus_health["baudrate"] = baud
+        print(f"Bus health        : avg {bus_health['load_avg']:.2f}% / "
+              f"peak {bus_health['load_peak']:.2f}% load (assumed {baud/1000:.0f} kbit/s)")
+        if bus_health["bus_off"]:
+            print(f"  BUS-OFF/Power-OFF : {len(bus_health['bus_off'])} gap(s) > "
+                  f"{args.gap_threshold:g}s with no frames of any ID:")
+            for g in bus_health["bus_off"]:
+                print(f"    {g['start_clock']} -> {g['end_clock']}   ({g['duration']:.2f}s)")
+        else:
+            print(f"  BUS-OFF/Power-OFF : none (threshold {args.gap_threshold:g}s)")
+        print()
+
     plot_paths = []
     if not args.no_plots:
         print("Generating graphs…")
@@ -1159,8 +1337,12 @@ def main():
     if not args.no_excel:
         print("Writing Excel report…")
         xlsx = os.path.join(args.out, os.path.splitext(os.path.basename(args.log))[0] + "_report.xlsx")
+        sections = {"summary", "frames", "merged", "charts"}
+        if bus_health is not None:
+            sections.add("bus_health")
         saved = export_excel(xlsx, meta, [os.path.basename(p) for p in args.dbc],
-                             series, frames, frame_name_by_id, args.tol, plot_paths, t0)
+                             series, frames, frame_name_by_id, args.tol, plot_paths, t0,
+                             sections=sections, bus_health=bus_health)
         if saved:
             size_mb = os.path.getsize(saved) / 1e6
             print(f"  saved {saved}  ({size_mb:.1f} MB)\n")

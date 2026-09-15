@@ -4,6 +4,10 @@
   Single-file, no build step, all decoding happens locally in the browser
   (no file is ever uploaded anywhere).
 
+  Trace formats (auto-detected): BUSMASTER ASCII log, quoted CSV (MiniMon-
+  compatible), and candump / SocketCAN (both the `candump -l` log format
+  and the live/`-t`-timestamped console format).
+
   An open-source personal project. No proprietary or vendor DBC content is
   bundled or referenced — bring your own .dbc file(s) and trace log.
 
@@ -19,88 +23,119 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>CANDecode</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.8/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.2.0/dist/chartjs-plugin-zoom.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.1.0/dist/chartjs-plugin-annotation.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
 <style>
   :root, :root[data-theme="dark"]{
-    --bg:#0a0d10; --panel:#12171c; --well:#0d1216; --ink:#e2eaec; --muted:#93a5aa;
-    --faint:#5c6d72; --line:#232d32; --line-soft:#1a2226; --accent:#ffb020; --accent-ink:#1a1204;
-    --warn:#ff5f56; --ok:#34d399; --ok-bg:#0f2a20; --grid:#1c2529; --tick:#7c8b90;
+    --bg:#0c100e; --panel:#141a16; --well:#19211b; --ink:#edf2eb; --muted:#a1afa4;
+    --faint:#63726a; --line:#2a352d; --line-soft:#202822; --accent:#c7f86b; --accent-ink:#14210d;
+    --warn:#ff8183; --ok:#6cdcd4; --ok-bg:#132420; --grid:#232f27; --tick:#7c8b7f;
     --gridline:rgba(255,255,255,0.035);
     --shadow:0 1px 2px rgba(0,0,0,0.4);
+    --radius:10px;
     --sans: "Segoe UI", system-ui, -apple-system, Roboto, Helvetica, Arial, sans-serif;
     --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
   }
   :root[data-theme="light"]{
-    --bg:#eef0ea; --panel:#ffffff; --well:#f3f4ee; --ink:#1b2320; --muted:#5c6b62;
-    --faint:#8a978c; --line:#d9ded2; --line-soft:#e8ebe1; --accent:#b8650a; --accent-ink:#ffffff;
-    --warn:#c9392b; --ok:#1f9d57; --ok-bg:#eaf7ee; --grid:#e2e6da; --tick:#5c6b62;
+    --bg:#f4f6f1; --panel:#ffffff; --well:#eef1e9; --ink:#151d16; --muted:#5b6a5c;
+    --faint:#8b9a8c; --line:#dbe3d5; --line-soft:#e8ede3; --accent:#4f7d1a; --accent-ink:#ffffff;
+    --warn:#c9392b; --ok:#0e8f86; --ok-bg:#e8f7f4; --grid:#e2e6da; --tick:#5c6b5c;
     --gridline:rgba(0,0,0,0.05);
     --shadow:0 1px 2px rgba(20,32,20,0.05);
   }
   *{box-sizing:border-box;}
-  html,body{margin:0; padding:0;}
+  html,body{margin:0; padding:0; height:100%;}
   body{
     background-color:var(--bg); color:var(--ink); font-family:var(--sans); font-size:13px; line-height:1.5;
     background-image:linear-gradient(var(--gridline) 1px, transparent 1px), linear-gradient(90deg, var(--gridline) 1px, transparent 1px);
     background-size:26px 26px; background-attachment:fixed;
   }
-  .wrap{max-width:1220px; margin:0 auto; padding:26px 20px 60px;}
+  button,input,select{font:inherit;}
+  button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--accent); outline-offset:2px;}
 
-  /* ── header ── */
-  .topbar{display:flex; justify-content:space-between; align-items:flex-start; gap:16px;}
-  .brand{display:flex; align-items:flex-start; gap:12px;}
-  .brand .led{margin-top:9px;}
-  .eyebrow{color:var(--accent); letter-spacing:.24em; font-size:10px; font-weight:700; text-transform:uppercase; margin-bottom:7px; font-family:var(--mono);}
-  h1{margin:0; font-size:27px; font-weight:800; letter-spacing:-0.02em; font-family:var(--mono);}
-  .subhead{color:var(--muted); font-size:12.5px; margin-top:8px; max-width:620px;}
-  .theme-switch{display:inline-flex; border:1px solid var(--line); border-radius:4px; overflow:hidden; background:var(--panel);}
-  .theme-switch button{background:transparent; border:none; color:var(--muted); cursor:pointer; font-family:var(--mono); font-size:11px; font-weight:700; padding:7px 13px;}
+  /* ── sidebar ── */
+  .sidebar{position:fixed; inset:0 auto 0 0; width:216px; border-right:1px solid var(--line); background:var(--panel); padding:22px 14px; display:flex; flex-direction:column; z-index:5; overflow-y:auto;}
+  .brand{display:flex; align-items:center; gap:9px; padding:0 6px; text-decoration:none; color:var(--ink);}
+  .brand .mark{width:26px; height:26px; border-radius:7px; background:var(--accent); color:var(--accent-ink); display:grid; place-items:center; flex-shrink:0;}
+  .brand b{font-family:var(--mono); font-size:16px; font-weight:800; letter-spacing:-0.02em;}
+  .sidebar .eyebrow{color:var(--accent); letter-spacing:.2em; font-size:9px; font-weight:700; text-transform:uppercase; font-family:var(--mono); margin:22px 6px 10px;}
+  nav{display:grid; gap:4px;}
+  .nav-item{width:100%; display:flex; align-items:center; gap:11px; border:1px solid transparent; background:none; padding:10px 10px; text-align:left; border-radius:6px; color:var(--muted); font-size:12.5px; cursor:pointer;}
+  .nav-item .num{font:10.5px var(--mono); opacity:.75; color:var(--faint);}
+  .nav-item:hover{background:var(--well); color:var(--ink);}
+  .nav-item.active{background:var(--ok-bg); color:var(--accent); border-color:var(--line);}
+  .nav-item.active .num{color:var(--accent);}
+  .sidebar-footer{margin-top:auto; padding:16px 10px 0; border-top:1px solid var(--line-soft); font-size:10.5px; color:var(--faint); line-height:1.7;}
+  .sidebar-footer strong{display:block; color:var(--muted); font-weight:600;}
+  .sidebar-footer a{color:var(--accent); text-decoration:none;}
+  .sidebar-footer a:hover{text-decoration:underline;}
+
+  main{margin-left:216px; min-height:100%;}
+  .topbar{height:52px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; padding:0 26px; gap:16px;}
+  .topbar .status-pill{display:flex; align-items:center; gap:7px; font-size:11px; color:var(--faint); font-family:var(--mono);}
+  .content{max-width:1180px; margin:0 auto; padding:22px 26px 50px;}
+
+  .theme-switch{display:inline-flex; border:1px solid var(--line); border-radius:4px; overflow:hidden; background:var(--well);}
+  .theme-switch button{background:transparent; border:none; color:var(--muted); cursor:pointer; font-family:var(--mono); font-size:10.5px; font-weight:700; padding:6px 11px;}
   .theme-switch button+button{border-left:1px solid var(--line);}
   .theme-switch button.active{background:var(--accent); color:var(--accent-ink);}
 
-  .rule-tech{height:1px; background:var(--line-soft); margin:18px 0 22px; position:relative;}
+  .rule-tech{height:1px; background:var(--line-soft); margin:0 0 20px; position:relative;}
   .rule-tech::before{content:''; position:absolute; top:-4px; left:0; width:52px; height:3px; background:var(--accent);}
 
-  /* ── instrument strip (LCD-style readouts) ── */
-  .instrument{display:grid; grid-template-columns:repeat(6,1fr); gap:10px; margin-bottom:20px;}
+  /* ── KPI widget tiles ── */
+  .instrument{display:grid; grid-template-columns:repeat(6,1fr); gap:12px; margin-bottom:20px;}
   .instrument.h3{grid-template-columns:repeat(3,1fr);}
-  @media (max-width:820px){ .instrument{grid-template-columns:repeat(3,1fr);} }
+  .instrument.h4{grid-template-columns:repeat(4,1fr);}
+  @media (max-width:820px){ .instrument{grid-template-columns:repeat(3,1fr);} .instrument.h4{grid-template-columns:repeat(2,1fr);} }
   @media (max-width:480px){ .instrument{grid-template-columns:repeat(2,1fr);} }
-  .itile{background:var(--well); border:1px solid var(--line); border-left:2px solid var(--accent); border-radius:3px; padding:10px 12px;}
-  .itile .ik{display:block; font-size:9px; letter-spacing:.1em; text-transform:uppercase; color:var(--faint); font-weight:700; font-family:var(--mono);}
-  .itile .iv{display:block; margin-top:5px; font-family:var(--mono); font-size:13px; font-weight:700; color:var(--ink);}
+  .itile{background:var(--well); border:1px solid var(--line); border-radius:var(--radius); padding:14px 16px; display:flex; flex-direction:column; gap:8px; transition:border-color .15s;}
+  .itile:hover{border-color:var(--accent);}
+  .itile .ik{display:flex; align-items:center; gap:7px; font-size:9.5px; letter-spacing:.09em; text-transform:uppercase; color:var(--faint); font-weight:700; font-family:var(--mono);}
+  .itile .ik .ico{font-size:13px; color:var(--accent); line-height:1;}
+  .itile .iv{font-family:var(--mono); font-size:21px; font-weight:800; color:var(--ink); letter-spacing:-0.01em; line-height:1.1;}
   .itile .iv.warn{color:var(--warn);}
-  .warnbox{background:var(--warn); color:#fff; border-radius:3px; padding:10px 12px; font-size:11.5px; font-weight:600; margin-bottom:14px; line-height:1.5;}
-  :root[data-theme="light"] .warnbox{color:#fff;}
+  .itile .ifoot{font-size:10px; color:var(--faint); margin-top:-2px;}
+  .warnbox{background:var(--warn); color:#1a0605; border-radius:var(--radius); padding:10px 12px; font-size:11.5px; font-weight:600; margin-bottom:14px; line-height:1.5;}
 
-  /* ── stage panels ── */
-  .stagerow{display:grid; gap:16px; margin-bottom:16px; align-items:start;}
-  .stagerow.c2{grid-template-columns:1fr 1fr;}
-  @media (max-width:900px){ .stagerow.c2{grid-template-columns:1fr;} }
-  .stage{position:relative; background:var(--panel); border:1px solid var(--line); border-radius:4px; padding:18px; box-shadow:var(--shadow); margin-bottom:16px;}
-  .stagerow .stage{margin-bottom:0;}
-  .stage::before{content:''; position:absolute; top:-1px; left:-1px; width:11px; height:11px; border-top:2px solid var(--accent); border-left:2px solid var(--accent);}
-  .stage::after{content:''; position:absolute; bottom:-1px; right:-1px; width:11px; height:11px; border-bottom:2px solid var(--accent); border-right:2px solid var(--accent);}
+  /* ── radial gauge widgets ── */
+  .gauge-row{display:flex; flex-wrap:wrap; gap:12px; margin-bottom:20px;}
+  .gauge-card{background:var(--well); border:1px solid var(--line); border-radius:var(--radius); padding:14px 16px 10px; flex:1 1 150px; min-width:150px; display:flex; flex-direction:column; align-items:center; transition:border-color .15s;}
+  .gauge-card:hover{border-color:var(--accent);}
+  .gauge-card .gauge-label{display:flex; align-items:center; gap:6px; font-size:9.5px; letter-spacing:.09em; text-transform:uppercase; color:var(--faint); font-weight:700; font-family:var(--mono); align-self:flex-start;}
+  .gauge-card .gauge-label .ico{font-size:13px; color:var(--accent); line-height:1;}
+  .gauge-card .gauge-canvas-wrap{position:relative; width:100%; max-width:150px; height:82px; margin-top:2px;}
+  .gauge-card .gauge-foot{font-size:10px; color:var(--faint); margin-top:2px;}
+  .widget-row-label{font-weight:700; color:var(--muted); text-transform:uppercase; font-size:10px; letter-spacing:.06em; margin:0 0 10px;}
+
+  /* ── stage panels (cards) ── */
+  .section-panel[hidden]{display:none;}
+  .stage{position:relative; background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); padding:20px; box-shadow:var(--shadow); margin-bottom:16px; overflow:hidden;}
+  .stage::before{content:''; position:absolute; top:0; left:0; right:0; height:3px; background:linear-gradient(90deg, var(--accent) 0%, var(--accent) 18%, transparent 75%);}
   .stage-head{display:flex; align-items:center; gap:10px; margin-bottom:14px; padding-bottom:10px; border-bottom:1px solid var(--line-soft);}
   .stage-idx{font-family:var(--mono); font-size:10px; font-weight:800; color:var(--accent-ink); background:var(--accent); border-radius:3px; padding:2px 6px; letter-spacing:.05em;}
   .stage-head h2{margin:0; font-size:11px; letter-spacing:.11em; text-transform:uppercase; color:var(--ink); font-weight:800; flex:1;}
+  .stage-nextrow{display:flex; justify-content:flex-end; margin-top:4px;}
 
   /* ── LEDs ── */
   .led{width:7px; height:7px; border-radius:50%; display:inline-block; background:var(--faint); margin-right:7px; vertical-align:middle;}
   .led.ok{background:var(--ok); box-shadow:0 0 6px var(--ok);}
 
   /* ── drop zones ── */
-  .drop{border:1px dashed var(--line); border-radius:3px; padding:12px; background:var(--well); cursor:pointer; display:flex; align-items:center; justify-content:space-between; gap:8px;}
-  .drop:hover{border-color:var(--accent);}
+  .drop{border:1px dashed var(--line); border-radius:6px; padding:14px; background:var(--well); cursor:pointer; display:flex; align-items:center; gap:12px;}
+  .drop:hover, .drop.dragover{border-color:var(--accent);}
   .drop.filled{border-color:var(--ok); border-style:solid; background:var(--ok-bg);}
   .drop input{display:none;}
-  .drop .led{background:var(--faint);}
-  .drop.filled .led{background:var(--ok); box-shadow:0 0 6px var(--ok);}
-  .drop-label{font-size:12.5px; font-weight:600;}
-  .drop-label small{display:block; color:var(--faint); margin-top:2px; font-size:10.5px; font-weight:400; margin-left:14px;}
+  .drop-icon{width:34px; height:34px; border-radius:8px; display:grid; place-items:center; background:var(--line-soft); color:var(--accent); font-size:16px; flex-shrink:0;}
+  .drop .led{display:none;}
+  .drop-label{font-size:12.5px; font-weight:600; flex:1;}
+  .drop-label small{display:block; color:var(--faint); margin-top:2px; font-size:10.5px; font-weight:400;}
   .drop .status{font-size:10.5px; color:var(--faint); font-family:var(--mono); white-space:nowrap;}
   .drop.filled .status{color:var(--ok);}
+  .format-badge{font-size:9.5px; font-family:var(--mono); font-weight:700; color:var(--accent); background:var(--ok-bg); border:1px solid var(--line); border-radius:3px; padding:2px 6px; white-space:nowrap;}
   .dbc-list{margin-top:8px; display:flex; flex-direction:column; gap:5px;}
   .dbc-item{display:flex; align-items:center; gap:8px; background:var(--well); border:1px solid var(--line-soft); border-radius:3px; padding:5px 8px; font-size:11px;}
   .dbc-item .nm{font-family:var(--mono); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1;}
@@ -109,29 +144,45 @@
   .field{margin-top:12px;}
   .field label{display:block; font-size:10px; color:var(--faint); margin-bottom:5px; text-transform:uppercase; letter-spacing:.07em; font-weight:700;}
   .field input[type=text]{width:100%; background:var(--well); border:1px solid var(--line); color:var(--ink); padding:8px 9px; border-radius:3px; font-family:var(--mono); font-size:12px;}
-  .fieldrow{display:grid; grid-template-columns:1fr 1fr; gap:12px;}
+  .fieldrow{display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px;}
+  @media (max-width:560px){ .fieldrow{grid-template-columns:1fr;} }
 
   /* ── buttons ── */
-  .btn{font-family:var(--mono); font-weight:700; letter-spacing:.04em; text-transform:uppercase; border-radius:3px; cursor:pointer; font-size:11px;}
+  .btn{font-family:var(--mono); font-weight:700; letter-spacing:.04em; text-transform:uppercase; border-radius:3px; cursor:pointer; font-size:11px; border:1px solid var(--line); background:var(--well); color:var(--muted); padding:9px 14px;}
   .btn.primary{background:var(--accent); color:var(--accent-ink); border:1px solid var(--accent); padding:9px 16px;}
   .btn.primary:disabled{background:var(--line); border-color:var(--line); color:var(--faint); cursor:not-allowed;}
   .btn.block{width:100%; padding:12px; margin-top:16px; font-size:11.5px;}
   .btn.ghost{background:var(--well); border:1px solid var(--line); color:var(--muted); padding:7px 12px; font-size:10.5px;}
   .btn.ghost:hover{border-color:var(--accent); color:var(--accent);}
   .btn.ghost:disabled{color:var(--faint); border-color:var(--line-soft); cursor:not-allowed;}
+  .icon-btn{height:28px; min-width:30px; display:grid; place-items:center; background:var(--well); border:1px solid var(--line); border-radius:5px; font-size:15px; line-height:1; color:var(--muted); cursor:pointer;}
+  .icon-btn:hover{color:var(--accent); border-color:var(--accent);}
 
   /* ── console ── */
-  .console{background:#050708; border:1px solid var(--line); border-radius:3px; padding:11px 12px; height:150px; overflow-y:auto; font-size:11px; color:#7fe0a8; font-family:var(--mono);}
+  .console{background:#050708; border:1px solid var(--line); border-radius:3px; padding:11px 12px; height:340px; overflow-y:auto; font-size:11px; color:#7fe0a8; font-family:var(--mono);}
   :root[data-theme="light"] .console{background:#12160f; color:#8fe6ac;}
   .console .l{white-space:pre-wrap;}
   .console .l.err{color:#ff8b7a;} .console .l.info{color:#63c8ff;} .console .l.dim{color:#6d7f92;}
 
   .toolbar{display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;}
-  .checklist{display:flex; flex-direction:column; gap:2px; max-height:230px; overflow-y:auto; margin-top:4px;}
-  .checkrow{display:flex; align-items:center; gap:8px; font-size:12px; padding:5px 6px; border-radius:3px;}
-  .checkrow:hover{background:var(--well);}
+
+  /* ── checkbox tree (CAN ID -> signals) ── */
+  .checklist{display:flex; flex-direction:column; gap:0; max-height:420px; overflow-y:auto; margin-top:4px; border:1px solid var(--line-soft); border-radius:4px;}
+  .can-group+.can-group{border-top:1px solid var(--line-soft);}
+  .can-group-head{display:flex; align-items:center; background:var(--well);}
+  .checkrow{display:flex; align-items:center; gap:9px; font-size:12px; padding:9px 10px; cursor:pointer; flex:1; min-width:0;}
+  .checkrow.parent{font-weight:600;}
+  .checkrow.child{padding-left:30px;}
+  .checkrow.child:hover{background:var(--well);}
+  .checkrow input[type=checkbox]{accent-color:var(--accent); width:15px; height:15px; flex-shrink:0; cursor:pointer;}
   .checkrow .id{color:var(--accent); font-family:var(--mono); font-size:10.5px; font-weight:600;}
-  .checkrow .n{color:var(--faint); font-family:var(--mono); font-size:10px; margin-left:auto;}
+  .checkrow .message-name{overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+  .checkrow .n{color:var(--faint); font-family:var(--mono); font-size:10px; margin-left:auto; white-space:nowrap;}
+  .caret{margin:0 8px 0 0; background:none; border:0; width:26px; height:26px; color:var(--faint); font-size:13px; cursor:pointer; flex-shrink:0;}
+  .caret:hover{color:var(--accent);}
+  .can-group-body[hidden]{display:none;}
+  .selection-summary{padding:9px 10px; font-size:11px; color:var(--faint); border-top:1px solid var(--line-soft); background:var(--well);}
+  .selection-summary strong{color:var(--accent);}
 
   table{width:100%; border-collapse:collapse; font-size:11.5px; font-family:var(--mono);}
   th,td{padding:7px 10px; text-align:right; border-bottom:1px solid var(--line-soft); white-space:nowrap;}
@@ -140,15 +191,26 @@
   tbody tr:hover{background:var(--well);}
   td.warn{color:var(--warn); font-weight:700;}
   .tablewrap{overflow-x:auto;}
+  .table-label{margin:14px 0 4px; font-weight:700; color:var(--muted); text-transform:uppercase; font-size:10px; letter-spacing:.06em; display:flex; align-items:center; justify-content:space-between; gap:8px;}
+  .table-label .pill{font-family:var(--mono); font-size:9.5px; font-weight:700; color:var(--accent); background:var(--ok-bg); border:1px solid var(--line); border-radius:3px; padding:2px 6px; text-transform:none; letter-spacing:0;}
+  .table-label .pill.warn{color:var(--warn); background:transparent; border-color:var(--warn);}
 
   .charts{display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:6px;}
   @media (max-width:760px){ .charts{grid-template-columns:1fr;} }
-  .chartcard{background:var(--well); border:1px solid var(--line-soft); border-radius:3px; padding:12px;}
-  .chartcard .ctitle{font-size:10.5px; color:var(--faint); margin-bottom:6px; display:flex; justify-content:space-between; gap:8px; font-family:var(--mono);}
-  .chartcard .ctitle b{color:var(--ink);}
+  .chartcard{background:var(--well); border:1px solid var(--line-soft); border-radius:var(--radius); padding:14px;}
+  .chartcard .ctitle{display:flex; justify-content:space-between; align-items:flex-start; gap:8px; margin-bottom:2px;}
+  .chartcard .ctitle-txt{font-size:10.5px; color:var(--faint); font-family:var(--mono); min-width:0;}
+  .chartcard .ctitle-txt b{color:var(--ink); display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+  .chartcard .chart-tools{display:flex; gap:5px; flex-shrink:0;}
   .chartcard canvas{max-height:170px;}
+  .signal-current{font-family:var(--mono); font-size:23px; font-weight:800; margin:2px 0 8px; line-height:1.1;}
+  .signal-current small{font-size:11px; font-weight:600; color:var(--faint); margin-left:5px;}
+  .chart-tools{display:flex; gap:5px; align-items:center;}
   .chartblock{margin-top:6px;}
+  .chartblock .ctitle{display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;}
+  .chartblock .ctitle-txt{font-size:10.5px; color:var(--faint); font-family:var(--mono);}
   .chartblock canvas{max-height:220px;}
+  .chart-hint{font-size:10px; color:var(--faint); font-family:var(--mono); margin-top:4px;}
   .empty{color:var(--faint); font-size:12px; padding:22px 0; text-align:center;}
 
   .trimbar{display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:12px; padding:10px 12px; background:var(--well); border:1px solid var(--line-soft); border-radius:3px;}
@@ -157,133 +219,247 @@
   .trimbar input[type=text]{width:110px; background:var(--panel); border:1px solid var(--line); color:var(--ink); padding:6px 7px; border-radius:3px; font-family:var(--mono); font-size:11.5px;}
   .trimbar .info{font-size:10.5px; color:var(--faint); font-family:var(--mono); margin-left:auto;}
 
-  footer{margin-top:28px; padding-top:16px; border-top:1px solid var(--line-soft); color:var(--faint); font-size:11px; text-align:center; line-height:1.9;}
+  /* ── custom graph (overlay 2-4 signals) ── */
+  .overlay-controls{display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:12px;}
+  .overlay-controls select{background:var(--well); border:1px solid var(--line); color:var(--ink); padding:7px 8px; border-radius:3px; font-size:11.5px; min-width:150px; flex:1 1 150px;}
+  .overlay-controls label{display:flex; align-items:center; gap:6px; font-size:11.5px; color:var(--muted); white-space:nowrap; cursor:pointer;}
+  .overlay-controls input[type=checkbox]{accent-color:var(--accent); width:15px; height:15px; cursor:pointer;}
+
+  footer{margin-top:10px; padding-top:16px; border-top:1px solid var(--line-soft); color:var(--faint); font-size:11px; text-align:center; line-height:1.9;}
   footer b{color:var(--muted); font-family:var(--mono);}
   footer a{color:var(--accent); text-decoration:none;}
   footer a:hover{text-decoration:underline;}
+
+  /* ── expanded-chart modal ── */
+  .modal{position:fixed; inset:0; z-index:100; display:grid; place-items:center; padding:24px;}
+  .modal-backdrop{position:absolute; inset:0; background:rgba(4,6,5,0.72); backdrop-filter:blur(6px);}
+  .modal-box{position:relative; width:100%; max-width:1200px; height:82vh; background:var(--panel); border:1px solid var(--line); border-radius:10px; display:flex; flex-direction:column; box-shadow:0 30px 90px rgba(0,0,0,0.5);}
+  .modal-box .modal-head{padding:16px 20px; display:flex; align-items:center; justify-content:space-between; gap:14px; border-bottom:1px solid var(--line-soft);}
+  .modal-box .modal-head h2{margin:0; font-size:13px; font-family:var(--mono); color:var(--ink);}
+  .modal-box .chart-area{flex:1; min-height:0; padding:16px 20px;}
+  .modal-box .chart-area canvas{width:100%; height:100%;}
+  .modal-box .modal-foot{padding:10px 20px; border-top:1px solid var(--line-soft); display:flex; justify-content:space-between; color:var(--faint); font-size:10.5px; font-family:var(--mono);}
+  @media (max-width:780px){ .modal{padding:8px;} .modal-box{height:92vh;} }
+
+  @media (max-width:900px){
+    .sidebar{position:relative; width:100%; height:auto; padding:14px; border-right:0; border-bottom:1px solid var(--line);}
+    .sidebar .eyebrow, .sidebar-footer{display:none;}
+    nav{display:flex; overflow-x:auto; gap:5px;}
+    .nav-item{width:auto; white-space:nowrap;}
+    main{margin-left:0;}
+    .content{padding:18px;}
+  }
 </style>
 </head>
 <body>
-<div class="wrap">
+<aside class="sidebar">
+  <a class="brand" href="#" data-stage="01">
+    <span class="mark" aria-hidden="true">
+      <svg width="15" height="15" viewBox="0 0 28 28" fill="none"><path d="M2 15h6V7h10v15h8" stroke="currentColor" stroke-width="3"/></svg>
+    </span>
+    <b>CANDecode</b>
+  </a>
+  <div class="eyebrow">CAN Bus · Diagnostic Bench</div>
+  <nav aria-label="Analysis stages">
+    <button class="nav-item active" data-stage="01" aria-current="page"><span class="num">01</span> Source Files</button>
+    <button class="nav-item" data-stage="02"><span class="num">02</span> Console</button>
+    <button class="nav-item" data-stage="03"><span class="num">03</span> Signals Decoded</button>
+    <button class="nav-item" data-stage="04"><span class="num">04</span> Stats</button>
+    <button class="nav-item" data-stage="05"><span class="num">05</span> Bus Health</button>
+    <button class="nav-item" data-stage="06"><span class="num">06</span> Charts</button>
+  </nav>
+  <div class="sidebar-footer">
+    <strong>Dhanoosh B</strong>
+    <a href="https://github.com/DevDhanoosh" target="_blank" rel="noopener">github.com/DevDhanoosh</a><br>
+    <a href="https://www.linkedin.com/in/dhanoosh-b-754945199/" target="_blank" rel="noopener">LinkedIn</a><br>
+    <a href="mailto:dhanoosh2001@gmail.com">dhanoosh2001@gmail.com</a><br>
+    MIT licensed · runs fully client-side
+  </div>
+</aside>
+<main>
   <div class="topbar">
-    <div class="brand">
-      <span class="led ok" title="runs fully client-side"></span>
-      <div>
-        <div class="eyebrow">CAN BUS · DIAGNOSTIC BENCH</div>
-        <h1>CANDecode</h1>
-        <div class="subhead">Load one or more DBC databases and a CAN trace, decode every signal they agree on, plot it, check bus health, and export a tidy Excel workbook — entirely client-side, nothing leaves your browser.</div>
-      </div>
-    </div>
+    <span class="status-pill"><span class="led ok"></span>runs fully client-side · nothing leaves your browser</span>
     <div class="theme-switch" id="themeSwitch">
       <button data-v="dark" class="active">◑ DARK</button>
       <button data-v="light">◐ LIGHT</button>
     </div>
   </div>
-  <div class="rule-tech"></div>
+  <div class="content">
+    <div class="instrument">
+      <div class="itile"><span class="ik"><span class="ico">◷</span>Date</span><span class="iv" id="roDate">—</span></div>
+      <div class="itile"><span class="ik"><span class="ico">▷</span>Start</span><span class="iv" id="roStart">—</span></div>
+      <div class="itile"><span class="ik"><span class="ico">◁</span>End</span><span class="iv" id="roEnd">—</span></div>
+      <div class="itile"><span class="ik"><span class="ico">◫</span>Duration</span><span class="iv" id="roDur">—</span></div>
+      <div class="itile"><span class="ik"><span class="ico">▤</span>Frames</span><span class="iv" id="roFrames">—</span></div>
+      <div class="itile"><span class="ik"><span class="ico">〰</span>Signals</span><span class="iv" id="roSignals">—</span></div>
+    </div>
 
-  <div class="instrument">
-    <div class="itile"><span class="ik">Date</span><span class="iv" id="roDate">—</span></div>
-    <div class="itile"><span class="ik">Start</span><span class="iv" id="roStart">—</span></div>
-    <div class="itile"><span class="ik">End</span><span class="iv" id="roEnd">—</span></div>
-    <div class="itile"><span class="ik">Duration</span><span class="iv" id="roDur">—</span></div>
-    <div class="itile"><span class="ik">Frames</span><span class="iv" id="roFrames">—</span></div>
-    <div class="itile"><span class="ik">Signals</span><span class="iv" id="roSignals">—</span></div>
-  </div>
-
-  <div class="stagerow c2">
-    <div class="stage">
-      <div class="stage-head"><span class="stage-idx">01</span><h2>Source Files</h2></div>
-      <label class="drop" id="dbcDrop">
-        <div class="drop-label"><span class="led"></span>DBC databases<small>up to 10 files · merged by ID</small></div>
-        <div class="status" id="dbcStatus">none selected</div>
-        <input type="file" id="dbcInput" accept=".dbc" multiple>
-      </label>
-      <div class="dbc-list" id="dbcList"></div>
-      <div style="height:10px"></div>
-      <label class="drop" id="logDrop">
-        <div class="drop-label"><span class="led"></span>CAN log trace<small>BUSMASTER (.log/.asc) or quoted CSV (.csv)</small></div>
-        <div class="status" id="logStatus">none selected</div>
-        <input type="file" id="logInput" accept=".log,.txt,.asc,.csv">
-      </label>
-      <div class="subhead" style="margin:6px 0 0;">Runs best on short traces (~5–10 min). Very long logs (an hour+) parse more slowly and, on dense buses, can briefly freeze the tab while decoding or exporting.</div>
-      <div class="fieldrow">
-        <div class="field">
-          <label>Merge tolerance (s)</label>
-          <input type="text" id="tolInput" value="0.1">
+    <section class="section-panel" id="stage01">
+      <div class="stage">
+        <div class="stage-head"><span class="stage-idx">01</span><h2>Source Files</h2></div>
+        <label class="drop" id="dbcDrop">
+          <span class="drop-icon" aria-hidden="true">⇪</span>
+          <div class="drop-label">DBC databases<small>up to 10 files · merged by ID</small></div>
+          <div class="status" id="dbcStatus">none selected</div>
+          <input type="file" id="dbcInput" accept=".dbc" multiple>
+        </label>
+        <div class="dbc-list" id="dbcList"></div>
+        <div style="height:10px"></div>
+        <label class="drop" id="logDrop">
+          <span class="drop-icon" aria-hidden="true">⇪</span>
+          <div class="drop-label">CAN log trace<small>BUSMASTER (.log/.asc), quoted CSV (.csv), or candump (.log)</small></div>
+          <div class="status" id="logStatus">none selected</div>
+          <input type="file" id="logInput" accept=".log,.txt,.asc,.csv">
+        </label>
+        <div id="logFormatRow" style="display:none; margin-top:8px;"><span class="format-badge" id="logFormatBadge">—</span></div>
+        <div class="subhead" style="color:var(--muted); font-size:12px; margin:10px 0 0;">Runs best on short traces (~5–10 min). Very long logs (an hour+) parse more slowly and, on dense buses, can briefly freeze the tab while decoding or exporting.</div>
+        <div class="fieldrow">
+          <div class="field">
+            <label>Merge tolerance (s)</label>
+            <input type="text" id="tolInput" value="0.1">
+          </div>
+          <div class="field">
+            <label>Bus bit rate (bit/s)</label>
+            <input type="text" id="baudrateInp" placeholder="auto / ask on Decode">
+          </div>
+          <div class="field">
+            <label>BUS-OFF / power-off gap (s)</label>
+            <input type="text" id="gapThresholdInp" value="2.0">
+          </div>
         </div>
-        <div class="field">
-          <label>Bus bit rate (bit/s)</label>
-          <input type="text" id="baudrateInp" placeholder="auto / ask on Decode">
+        <button class="btn primary block" id="runBtn" disabled>▶ Decode</button>
+      </div>
+    </section>
+
+    <section class="section-panel" id="stage02" hidden>
+      <div class="stage">
+        <div class="stage-head"><span class="stage-idx">02</span><h2>Console</h2></div>
+        <div class="console" id="console"><div class="l dim">Waiting for files…</div></div>
+      </div>
+    </section>
+
+    <section class="section-panel" id="stage03" hidden>
+      <div class="stage">
+        <div class="stage-head">
+          <span class="stage-idx">03</span><h2>Signals Decoded</h2>
+          <button class="btn ghost" id="downloadBtn" disabled>Export .xlsx</button>
+        </div>
+        <div class="subhead" style="color:var(--muted); font-size:12px; margin:-6px 0 12px;">Tick the signals you want <b>charted</b>. Click a CAN ID to toggle all its signals at once. The Excel Merged/Summary sheets always include every decoded signal, regardless of what's ticked here.</div>
+        <div class="toolbar" id="sigActions" style="display:none; margin:0 0 8px;">
+          <div style="display:flex; gap:8px;">
+            <button class="btn ghost" id="selectAllBtn">All</button>
+            <button class="btn ghost" id="deselectAllBtn">None</button>
+          </div>
+        </div>
+        <div id="checklistWrap"><div class="empty">Run a decode to see signals.</div></div>
+        <div class="selection-summary" id="selectionSummary" style="display:none;" role="status"></div>
+      </div>
+    </section>
+
+    <section class="section-panel" id="stage04" hidden>
+      <div class="stage">
+        <div class="stage-head"><span class="stage-idx">04</span><h2>Stats</h2></div>
+        <div class="tablewrap" id="statsWrap"><div class="empty">No data yet.</div></div>
+      </div>
+    </section>
+
+    <section class="section-panel" id="stage05" hidden>
+      <div class="stage">
+        <div class="stage-head"><span class="stage-idx">05</span><h2>Bus Health</h2></div>
+        <div class="subhead" style="color:var(--muted); font-size:12px; margin:-6px 0 14px;">Per-ID timing and BUS-OFF/Power-OFF gaps are computed directly from frame timestamps, so they're exact. Bus load % is an <b>estimate</b> (see README). Silence alone doesn't prove a bus-off or power loss — it means no frame of any ID was seen for longer than the threshold.</div>
+        <div id="healthWarnings"></div>
+        <div class="gauge-row" id="healthTiles"></div>
+        <div class="chartblock" id="busLoadBlock" style="display:none;">
+          <div class="ctitle">
+            <span class="ctitle-txt">Bus load over time (estimated) — red band = BUS-OFF/Power-OFF</span>
+            <div class="chart-tools">
+              <button class="icon-btn" data-reset-zoom="busLoadCanvas" aria-label="Reset bus load chart zoom" title="Reset zoom">⤺</button>
+              <button class="icon-btn" data-expand="busLoadCanvas" aria-label="Expand bus load chart" title="Expand chart">⛶</button>
+            </div>
+          </div>
+          <canvas id="busLoadCanvas"></canvas>
+          <div class="chart-hint">Scroll to zoom · drag to pan · pinch on touch</div>
+        </div>
+        <div class="tablewrap">
+          <div class="table-label">Per-message-ID timing</div>
+          <div id="perIdWrap"><div class="empty">Run a decode to see bus health.</div></div>
+        </div>
+        <div class="tablewrap" id="errorTypesWrap" style="display:none;">
+          <div class="table-label">Error frame types</div>
+          <div id="errorTypesTable"></div>
+        </div>
+        <div class="tablewrap" id="busOffOuterWrap" style="display:none;">
+          <div class="table-label">BUS-OFF / Power-OFF events <span class="pill warn" id="gapCountBadge">0 gaps</span></div>
+          <div id="busOffWrap"></div>
         </div>
       </div>
-      <button class="btn primary block" id="runBtn" disabled>▶ Decode</button>
-    </div>
+    </section>
 
-    <div class="stage">
-      <div class="stage-head"><span class="stage-idx">02</span><h2>Console</h2></div>
-      <div class="console" id="console"><div class="l dim">Waiting for files…</div></div>
-    </div>
+    <section class="section-panel" id="stage06" hidden>
+      <div class="stage">
+        <div class="stage-head"><span class="stage-idx">06</span><h2>Charts</h2></div>
+        <div class="trimbar" id="trimBar" style="display:none">
+          <span class="lbl">Trim</span>
+          <select id="trimMode"><option value="clock">Clock time</option><option value="sec">Seconds</option></select>
+          <input type="text" id="trimStartInp" placeholder="start">
+          <span>–</span>
+          <input type="text" id="trimEndInp" placeholder="end">
+          <button class="btn ghost" id="trimApply">Apply</button>
+          <button class="btn ghost" id="trimReset">Reset</button>
+          <span class="info" id="trimInfo"></span>
+        </div>
+        <div class="chart-hint" style="margin-bottom:8px;">Scroll to zoom · drag to pan · pinch on touch · ⛶ expands a chart</div>
+        <div id="chartsWrap" class="charts"></div>
+      </div>
+
+      <div class="stage">
+        <div class="stage-head">
+          <span class="stage-idx">06</span><h2>Custom Graph — Overlay 2–4 Signals</h2>
+          <div class="chart-tools">
+            <button class="icon-btn" data-reset-zoom="overlayCanvas" aria-label="Reset custom graph zoom" title="Reset zoom">⤺</button>
+            <button class="icon-btn" data-expand="overlayCanvas" aria-label="Expand custom graph" title="Expand chart">⛶</button>
+          </div>
+        </div>
+        <div class="subhead" style="color:var(--muted); font-size:12px; margin:-6px 0 12px;">Pick 2–4 signals to compare directly on one chart — independent y-axes, or normalized 0–1 to compare shape regardless of scale.</div>
+        <div class="overlay-controls">
+          <select id="ovSel0"><option value="">— none —</option></select>
+          <select id="ovSel1"><option value="">— none —</option></select>
+          <select id="ovSel2"><option value="">— none —</option></select>
+          <select id="ovSel3"><option value="">— none —</option></select>
+          <label><input type="checkbox" id="ovNormalize">Normalize 0–1</label>
+          <button class="btn primary" id="ovPlotBtn">Plot</button>
+        </div>
+        <div class="chartblock" id="overlayBlock">
+          <canvas id="overlayCanvas"></canvas>
+        </div>
+        <div class="chart-hint" id="overlayHint" style="display:none;">Scroll to zoom · drag to pan · pinch on touch</div>
+        <div class="empty" id="overlayEmpty">Pick 2–4 signals above, then Plot.</div>
+      </div>
+    </section>
+
+    <footer>
+      <b>CANDecode</b> · open source, MIT licensed<br>
+      Dhanoosh B ·
+      <a href="https://github.com/DevDhanoosh" target="_blank" rel="noopener">github.com/DevDhanoosh</a> ·
+      <a href="https://www.linkedin.com/in/dhanoosh-b-754945199/" target="_blank" rel="noopener">LinkedIn</a> ·
+      <a href="mailto:dhanoosh2001@gmail.com">dhanoosh2001@gmail.com</a>
+    </footer>
   </div>
+</main>
 
-  <div class="stage">
-    <div class="stage-head">
-      <span class="stage-idx">03</span><h2>Signals Decoded</h2>
-      <button class="btn ghost" id="downloadBtn" disabled>Export .xlsx</button>
-    </div>
-    <div class="subhead" style="margin:-6px 0 12px;">Tick the signals you want <b>charted</b>. The Excel Merged/Summary sheets always include every decoded signal, regardless of what's ticked here.</div>
-    <div class="toolbar" id="sigActions" style="display:none; margin:0 0 8px;">
-      <div style="display:flex; gap:8px;">
-        <button class="btn ghost" id="selectAllBtn">All</button>
-        <button class="btn ghost" id="deselectAllBtn">None</button>
+<div id="chartModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="chartModalTitle" style="display:none" tabindex="-1">
+  <div class="modal-backdrop" data-close-modal></div>
+  <div class="modal-box">
+    <div class="modal-head">
+      <h2 id="chartModalTitle">Chart</h2>
+      <div class="chart-tools">
+        <button class="btn ghost" data-reset-zoom="chartModalCanvas">⤺ Reset zoom</button>
+        <button class="icon-btn" id="closeModalBtn" data-close-modal aria-label="Close expanded chart">✕</button>
       </div>
     </div>
-    <div id="checklistWrap"><div class="empty">Run a decode to see signals.</div></div>
+    <div class="chart-area"><canvas id="chartModalCanvas" role="img" aria-label="Expanded chart"></canvas></div>
+    <div class="modal-foot"><span>Scroll to zoom · drag to pan · pinch on touch</span><span>ESC to close</span></div>
   </div>
-
-  <div class="stage">
-    <div class="stage-head"><span class="stage-idx">04</span><h2>Stats</h2></div>
-    <div class="tablewrap" id="statsWrap"><div class="empty">No data yet.</div></div>
-  </div>
-
-  <div class="stage">
-    <div class="stage-head"><span class="stage-idx">05</span><h2>Bus Health</h2></div>
-    <div class="subhead" style="margin:-6px 0 14px;">Per-ID timing is computed directly from frame timestamps, so it's exact. Bus load % is an <b>estimate</b> (see README). Error-frame sub-types are only as good as what your logging tool recorded.</div>
-    <div id="healthWarnings"></div>
-    <div class="instrument h3" id="healthTiles"></div>
-    <div class="chartblock" id="busLoadBlock" style="display:none;">
-      <canvas id="busLoadCanvas"></canvas>
-    </div>
-    <div class="tablewrap">
-      <div class="subhead" style="margin:14px 0 4px; font-weight:700; color:var(--muted); text-transform:uppercase; font-size:10px; letter-spacing:.06em;">Per-message-ID timing</div>
-      <div id="perIdWrap"><div class="empty">Run a decode to see bus health.</div></div>
-    </div>
-    <div class="tablewrap" id="errorTypesWrap" style="display:none;">
-      <div class="subhead" style="margin:14px 0 4px; font-weight:700; color:var(--muted); text-transform:uppercase; font-size:10px; letter-spacing:.06em;">Error frame types</div>
-      <div id="errorTypesTable"></div>
-    </div>
-  </div>
-
-  <div class="stage">
-    <div class="stage-head"><span class="stage-idx">06</span><h2>Charts</h2></div>
-    <div class="trimbar" id="trimBar" style="display:none">
-      <span class="lbl">Trim</span>
-      <select id="trimMode"><option value="clock">Clock time</option><option value="sec">Seconds</option></select>
-      <input type="text" id="trimStartInp" placeholder="start">
-      <span>–</span>
-      <input type="text" id="trimEndInp" placeholder="end">
-      <button class="btn ghost" id="trimApply">Apply</button>
-      <button class="btn ghost" id="trimReset">Reset</button>
-      <span class="info" id="trimInfo"></span>
-    </div>
-    <div id="chartsWrap" class="charts"></div>
-  </div>
-
-  <footer>
-    <b>CANDecode</b> · open source, MIT licensed<br>
-    Dhanoosh B ·
-    <a href="https://github.com/DevDhanoosh" target="_blank" rel="noopener">github.com/DevDhanoosh</a> ·
-    <a href="mailto:dhanoosh2001@gmail.com">dhanoosh2001@gmail.com</a>
-  </footer>
 </div>
 
 <script>
@@ -293,12 +469,13 @@
   const dbcDrop = $('dbcDrop'), logDrop = $('logDrop');
   const dbcStatus = $('dbcStatus'), logStatus = $('logStatus');
   const dbcList = $('dbcList');
+  const logFormatRow = $('logFormatRow'), logFormatBadge = $('logFormatBadge');
   const runBtn = $('runBtn'), downloadBtn = $('downloadBtn');
   const consoleEl = $('console');
-  const checklistWrap = $('checklistWrap'), sigActions = $('sigActions');
+  const checklistWrap = $('checklistWrap'), sigActions = $('sigActions'), selectionSummary = $('selectionSummary');
   const selectAllBtn = $('selectAllBtn'), deselectAllBtn = $('deselectAllBtn');
   const statsWrap = $('statsWrap'), chartsWrap = $('chartsWrap');
-  const tolInput = $('tolInput'), baudrateInp = $('baudrateInp');
+  const tolInput = $('tolInput'), baudrateInp = $('baudrateInp'), gapThresholdInp = $('gapThresholdInp');
   const trimBar = $('trimBar'), trimStartInp = $('trimStartInp'), trimEndInp = $('trimEndInp');
   const trimApply = $('trimApply'), trimReset = $('trimReset'), trimInfo = $('trimInfo'), trimMode = $('trimMode');
   const roDate = $('roDate'), roStart = $('roStart'), roEnd = $('roEnd'), roDur = $('roDur'), roFrames = $('roFrames'), roSignals = $('roSignals');
@@ -306,14 +483,67 @@
   const healthTiles = $('healthTiles'), perIdWrap = $('perIdWrap');
   const busLoadBlock = $('busLoadBlock'), busLoadCanvas = $('busLoadCanvas');
   const errorTypesWrap = $('errorTypesWrap'), errorTypesTable = $('errorTypesTable');
+  const busOffOuterWrap = $('busOffOuterWrap'), busOffWrap = $('busOffWrap'), gapCountBadge = $('gapCountBadge');
+  const chartModal = $('chartModal'), chartModalTitle = $('chartModalTitle'), chartModalCanvas = $('chartModalCanvas'), closeModalBtn = $('closeModalBtn');
+  const ovSelects = [$('ovSel0'), $('ovSel1'), $('ovSel2'), $('ovSel3')];
+  const ovNormalize = $('ovNormalize'), ovPlotBtn = $('ovPlotBtn');
+  const overlayCanvas = $('overlayCanvas'), overlayBlock = $('overlayBlock'), overlayHint = $('overlayHint'), overlayEmpty = $('overlayEmpty');
 
   const MAX_DBC = 10;
-  const palette = ['#e8951f','#22b3d4','#d24bbd','#3bb866','#5b8def','#e2564b'];
+  const palette = ['#c7f86b','#6cdcd4','#8caeff','#d2a0fa','#ffbd78','#ff8183'];
   const STUFF_FACTOR = 1.1;
+  const GAP_THRESHOLD_DEFAULT = 2.0;
+  let chartReady = false;
+  try{
+    chartReady = typeof Chart !== 'undefined' && typeof Hammer !== 'undefined' &&
+      !!Chart.registry.plugins.get('zoom') && !!Chart.registry.plugins.get('annotation');
+  }catch(e){ chartReady = false; }
   function themeColors(){
     const cs = getComputedStyle(document.documentElement);
     return { grid: cs.getPropertyValue('--grid').trim() || '#223042',
-             tick: cs.getPropertyValue('--tick').trim() || '#7f8ea3' };
+             tick: cs.getPropertyValue('--tick').trim() || '#7f8ea3',
+             warn: cs.getPropertyValue('--warn').trim() || '#ff8183' };
+  }
+  function zoomPluginOptions(){
+    if(!chartReady) return undefined;
+    return { pan:{ enabled:true, mode:'x' }, zoom:{ wheel:{ enabled:true, speed:0.08 }, pinch:{ enabled:true }, mode:'x' } };
+  }
+
+  // ── radial gauge widget (a Chart.js doughnut dialled down to ~3/4 turn,
+  // with the reading drawn in the middle) — used for bounded 0..max metrics
+  // like bus load %. No extra charting library needed.
+  function renderGauge(canvas, value, maxValue, labelText){
+    const cs = getComputedStyle(document.documentElement);
+    const lineColor = cs.getPropertyValue('--line').trim();
+    const inkColor = cs.getPropertyValue('--ink').trim();
+    const accent = cs.getPropertyValue('--accent').trim();
+    const warnColor = cs.getPropertyValue('--warn').trim();
+    const pct = maxValue > 0 ? Math.max(0, value / maxValue) : 0;
+    const clamped = Math.min(1, pct);
+    const color = pct >= 1 ? warnColor : (pct >= 0.65 ? '#ffbd78' : accent);
+    return new Chart(canvas, {
+      type: 'doughnut',
+      data: { datasets: [{ data: [clamped, 1 - clamped], backgroundColor: [color, lineColor], borderWidth: 0 }] },
+      options: {
+        responsive: true, maintainAspectRatio: false, animation: false,
+        circumference: 270, rotation: 225, cutout: '74%',
+        plugins: { legend: { display: false }, tooltip: { enabled: false } },
+      },
+      plugins: [{
+        id: 'gaugeCenterText',
+        afterDraw(chart){
+          const { ctx, chartArea } = chart;
+          const cx = (chartArea.left + chartArea.right) / 2;
+          const cy = (chartArea.top + chartArea.bottom) / 2 + chartArea.height * 0.14;
+          ctx.save();
+          ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          ctx.fillStyle = inkColor;
+          ctx.font = "700 15px ui-monospace, Consolas, monospace";
+          ctx.fillText(labelText, cx, cy);
+          ctx.restore();
+        }
+      }]
+    });
   }
 
   let dbcFiles = [];
@@ -324,13 +554,16 @@
   let allErrors = [];        // [{t, kind, raw}]
   let frameNameById = {};
   let logMeta = null;
-  let charts = [];
-  let healthCharts = [];
+  let charts = [];           // Chart.js instances for per-signal chart cards
+  let healthCharts = [];     // Chart.js instances for the bus-load chart
+  let healthGaugeCharts = [];// Chart.js doughnut-gauge instances in the Bus Health tile row
   let logT0 = 0, logDur = 0;
   let trimStart = null, trimEnd = null;
   let dbcBaudrate = null, dbcBaudrateConflict = false;
   let cachedTrace = null;
   let baudrateSource = null;   // null | 'user' | 'log' | 'dbc' — precedence in that order
+  let modalChart = null, modalReturnFocus = null;
+  let overlayChart = null;
 
   // ── small helpers ────────────────────────────────────────
   const pad2 = n => String(n).padStart(2,'0');
@@ -369,13 +602,21 @@
     return out;
   }
 
-  // ── file inputs ──────────────────────────────────────────
+  // ── file inputs (click-to-browse + real drag-and-drop) ───
   function readFile(file){
     return new Promise((res, rej)=>{
       const r = new FileReader();
       r.onload = ()=> res(r.result);
       r.onerror = ()=> rej(new Error('read failed: '+file.name));
       r.readAsText(file);
+    });
+  }
+  function wireDropzone(zoneEl, onFiles){
+    zoneEl.addEventListener('dragover', e=>{ e.preventDefault(); zoneEl.classList.add('dragover'); });
+    zoneEl.addEventListener('dragleave', ()=> zoneEl.classList.remove('dragover'));
+    zoneEl.addEventListener('drop', e=>{
+      e.preventDefault(); zoneEl.classList.remove('dragover');
+      if(e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) onFiles(e.dataTransfer.files);
     });
   }
   function paintDatabaseList(){
@@ -401,23 +642,25 @@
     paintDatabaseList();
     refreshReadyState();
   }
-  dbcInput.addEventListener('change', async e=>{
-    const picked = Array.from(e.target.files || []);
+  async function addDbcFiles(fileList){
+    const picked = Array.from(fileList || []);
     for(const f of picked){
+      if(!/\.dbc$/i.test(f.name)) continue;
       if(dbcFiles.length >= MAX_DBC){ log(`DBC limit reached (${MAX_DBC}). "${f.name}" skipped.`, 'err'); break; }
       if(dbcFiles.some(d=>d.name === f.name)) continue;
       try{ dbcFiles.push({ name:f.name, text: await readFile(f) }); } catch(err){ log(err.message, 'err'); }
     }
-    dbcInput.value = '';
     refreshDatabaseUI();
-  });
-  logInput.addEventListener('change', async e=>{
-    const f = e.target.files[0];
-    if(!f) return;
+  }
+  dbcInput.addEventListener('change', e=>{ addDbcFiles(e.target.files).then(()=> dbcInput.value = ''); });
+  wireDropzone(dbcDrop, files=> addDbcFiles(files));
+
+  async function setLogFile(file){
+    if(!file) return;
     try{
-      logText = await readFile(f);
-      logStatus.textContent = f.name;
-      logFileName = f.name.replace(/\.[^.]+$/, '');
+      logText = await readFile(file);
+      logStatus.textContent = file.name;
+      logFileName = file.name.replace(/\.[^.]+$/, '');
       logDrop.classList.add('filled');
       refreshReadyState();
     }catch(err){ log(err.message, 'err'); return; }
@@ -425,8 +668,11 @@
     // Pre-parse the log as soon as it's dropped in so Decode can reuse this
     // instead of parsing the same text twice.
     cachedTrace = null;
+    logFormatRow.style.display = 'none';
     try{
       cachedTrace = openTrace(logText);
+      logFormatBadge.textContent = cachedTrace.meta.format;
+      logFormatRow.style.display = '';
       if(cachedTrace.fmt === 'busmaster' && baudrateSource !== 'user'){
         const logBaud = readDeclaredLogBaudrate(logText);
         if(logBaud){
@@ -435,7 +681,9 @@
         }
       }
     }catch(err){ /* best-effort pre-scan only — real parse errors surface on Decode */ }
-  });
+  }
+  logInput.addEventListener('change', e=>{ setLogFile(e.target.files[0]); });
+  wireDropzone(logDrop, files=> setLogFile(files[0]));
 
   // ── DBC parsing ─────────────────────────────────────────
   function loadMessageDefinitions(text){
@@ -486,13 +734,20 @@
     return 'Error Frame (type not logged)';
   }
 
-  // ── LOG parsing (BUSMASTER + generic quoted CSV) ─────────
+  // ── LOG parsing: BUSMASTER, quoted CSV, candump (SocketCAN) ──
   const TRACE_LINE_RE = /^(\d{2}):(\d{2}):(\d{2}):(\d{4})\s+(?:Rx|Tx)\s+\d+\s+0x([0-9A-Fa-f]+)\s+([sx])\s+(\d+)((?:\s+[0-9A-Fa-f]{2})*)/;
   const TS_RE = /^(\d{2}):(\d{2}):(\d{2}):(\d{4})\s+(.*)$/;
+  // candump -l log format: "(1699887726.123456) can0 123#DEADBEEF" — remote
+  // frames as "123#R" / "123#R4", CAN FD frames as "123##1DEADBEEF..." (the
+  // first hex digit after ## is a flags nibble, not data).
+  const CANDUMP_LOG_RE = /^\s*\(\s*(\d+(?:\.\d+)?)\s*\)\s+(\S+)\s+([0-9A-Fa-f]{3,8})(##?)([0-9A-Fa-f]*|[Rr]\d*)\s*$/m;
+  // candump live / -t {a,d,z} console format: "[(timestamp) ]iface  ID   [DLC]  b0 b1 ..."
+  const CANDUMP_LIVE_RE = /^\s*(?:\(\s*(\d+(?:\.\d+)?)\s*\)\s+)?(\S+)\s+([0-9A-Fa-f]{3,8})\s+\[(\d{1,2})\]\s*((?:[0-9A-Fa-f]{2}\s*)*)$/m;
   function sniffTraceFormat(text){
     const head = text.slice(0, 3000);
     if(/"Identifier \(hex\)"/i.test(head)) return 'csv';
     if(/\bBUSMASTER\b/i.test(head) || TRACE_LINE_RE.test(head.split(/\r?\n/).find(l=>l.trim()) || '')) return 'busmaster';
+    if(CANDUMP_LOG_RE.test(head) || CANDUMP_LIVE_RE.test(head)) return 'candump';
     return /^\s*"[^"]*"\s*,\s*"[0-9A-Fa-f]+"/m.test(head) ? 'csv' : 'busmaster';
   }
   // BUSMASTER records the channel's configured bus speed in its header, e.g.
@@ -583,6 +838,66 @@
     }
     return { frames, counts:{ std, ext, malformed }, errors };
   }
+  // candump (Linux SocketCAN) — see CANDUMP_LOG_RE / CANDUMP_LIVE_RE above.
+  // ID length decides Standard vs Extended, matching candump's own printing
+  // convention: <=3 hex digits is an 11-bit Standard ID, else 29-bit
+  // Extended (candump zero-pads Extended IDs out to 8 digits). This treats
+  // the whole file as one merged bus/channel — like BUSMASTER and quoted-CSV
+  // traces elsewhere in this app, the interface name candump records per
+  // line isn't used to separate multiple channels mixed into one capture
+  // (e.g. `candump -l any`), so a gap on one interface can be masked by
+  // traffic on another if they were captured together.
+  function ingestCandump(text){
+    const lines = text.split(/\r?\n/); const frames = []; const errors = [];
+    let std = 0, ext = 0, malformed = 0;
+    let sawAny = false, sawRealTs = false, seq = 0;
+    for(const raw of lines){
+      const line = raw.trim();
+      if(!line) continue;
+      let m = CANDUMP_LOG_RE.exec(line);
+      if(m){
+        sawAny = true;
+        const [, tsStr, iface, idHex, sep, payload] = m;
+        const t = parseFloat(tsStr);
+        sawRealTs = true;
+        const extended = idHex.length > 3;
+        const id = parseInt(idHex, 16);
+        let dlc, bytes;
+        if(sep === '#' && /^[Rr]/.test(payload)){
+          const n = payload.slice(1);
+          dlc = /^\d+$/.test(n) ? parseInt(n,10) : 0;
+          bytes = [];
+        } else {
+          const hexdata = sep === '##' ? payload.slice(1) : payload;   // ## carries a flags nibble first
+          if(hexdata.length % 2 !== 0){ malformed++; continue; }
+          bytes = [];
+          for(let i=0;i<hexdata.length;i+=2) bytes.push(parseInt(hexdata.substr(i,2),16));
+          dlc = bytes.length;
+        }
+        if(extended) ext++; else std++;
+        frames.push({ t, id, dlc, bytes, extended, iface });
+        continue;
+      }
+      m = CANDUMP_LIVE_RE.exec(line);
+      if(m){
+        sawAny = true;
+        const [, tsStr, iface, idHex, dlcStr, byteStr] = m;
+        let t;
+        if(tsStr !== undefined){ t = parseFloat(tsStr); sawRealTs = true; }
+        else { t = seq; seq += 0.001; }   // no timestamp column — keep frame order only
+        const extended = idHex.length > 3;
+        const id = parseInt(idHex, 16);
+        const dlc = parseInt(dlcStr, 10);
+        const bytes = byteStr.trim().length ? byteStr.trim().split(/\s+/).map(b=>parseInt(b,16)) : [];
+        if(bytes.length < dlc){ malformed++; continue; }
+        if(extended) ext++; else std++;
+        frames.push({ t, id, dlc, bytes: bytes.slice(0,dlc), extended, iface });
+        continue;
+      }
+      malformed++;
+    }
+    return { frames, counts:{ std, ext, malformed }, errors, syntheticTime: sawAny && !sawRealTs };
+  }
   function spanOfFrames(frames){
     if(!frames.length) return 0;
     let first = frames[0].t, last = frames[0].t;
@@ -609,14 +924,31 @@
     const mon = MONTHS[Math.max(0, Math.min(11, mo-1))];
     return `${String(d).padStart(2,'0')} ${mon} ${year}`;
   }
+  const FORMAT_LABELS = { csv:'Quoted CSV trace', candump:'candump (SocketCAN)', busmaster:'BUSMASTER' };
   function openTrace(text){
     const fmt = sniffTraceFormat(text);
-    const parsed = fmt === 'csv' ? ingestQuotedCsv(text) : ingestTraceLog(text);
+    const parsed = fmt === 'csv' ? ingestQuotedCsv(text) : fmt === 'candump' ? ingestCandump(text) : ingestTraceLog(text);
     const frames = parsed.frames;
-    const meta = { format: fmt === 'csv' ? 'Quoted CSV trace' : 'BUSMASTER', date:'—', start:'—', end:'—', duration:'—', durSec:0, frames:frames.length };
+    const meta = { format: FORMAT_LABELS[fmt] || 'BUSMASTER', date:'—', start:'—', end:'—', duration:'—', durSec:0, frames:frames.length };
     if(fmt === 'csv'){
       const d = /^\s*Date:\s*([0-9]{1,4}[\/\-.][0-9]{1,2}[\/\-.][0-9]{1,4})/im.exec(text);
       if(d) meta.date = normalizeDate(d[1], 'mdy');
+    } else if(fmt === 'candump'){
+      meta.version = 'SocketCAN candump';
+      // candump timestamps are Unix epoch seconds (real calendar time), not
+      // seconds-since-midnight like the other two formats — recover an
+      // actual UTC date from them when they look like a real epoch (post-2001).
+      if(frames.length){
+        let first = frames[0].t;
+        for(const f of frames) if(f.t < first) first = f.t;
+        if(first > 1e9){
+          const d = new Date(first * 1000);
+          meta.date = `${pad2(d.getUTCDate())} ${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}  (UTC)`;
+        }
+      }
+      if(parsed.syntheticTime){
+        meta.note = "No timestamps found in this candump capture — frame order was kept but times are 1 ms apart and synthetic, so durations/rates/bus-load below are not meaningful. Capture with 'candump -l' or 'candump -t a' for real timestamps.";
+      }
     } else {
       const d = /START DATE(?:\s+AND\s+TIME)?\s*[:\-]?\s*([0-9]{1,2}[:\-\/][0-9]{1,2}[:\-\/][0-9]{2,4})/i.exec(text);
       if(d) meta.date = normalizeDate(d[1], 'dmy');
@@ -630,7 +962,6 @@
     }
     return { fmt, frames, counts: parsed.counts, errors: parsed.errors, meta };
   }
-
   // ── signal decode (Intel + Motorola, 2's-complement) ─────
   function extractSignalValue(bytes, sig){
     const len = sig.length;
@@ -715,10 +1046,33 @@
   // ═════════════════════════════════════════════════════════
   //  Bus load & health (mirrors the Python analyze_bus_health)
   // ═════════════════════════════════════════════════════════
-  function evaluateBusHealth(frames, durSec, baudrate, stuffFactor){
-    if(!frames.length || durSec <= 0) return { perId:[], bins:[], load:[], loadAvg:0, loadPeak:0 };
+  // Silent windows across the WHOLE trace (no frame of ANY ID) longer than
+  // thresholdSec — the signature of a bus going off, or the logger/vehicle
+  // losing power mid-capture, as opposed to a single ID dropping out while
+  // the rest of the bus keeps talking (see the per-ID "dropout" flag for
+  // that). Silence alone doesn't prove either cause — it's flagged as a
+  // suspected interruption, not a confirmed one.
+  function detectBusOffGaps(frames, thresholdSec){
+    if(frames.length < 2) return [];
+    const ts = frames.map(f=>f.t).sort((a,b)=>a-b);
+    const events = [];
+    for(let i=1;i<ts.length;i++){
+      const gap = ts[i] - ts[i-1];
+      if(gap > thresholdSec){
+        events.push({ startT: ts[i-1], endT: ts[i], duration: gap,
+                     startClock: secondsToClock(ts[i-1]), endClock: secondsToClock(ts[i]) });
+      }
+    }
+    return events;
+  }
+  function evaluateBusHealth(frames, durSec, baudrate, stuffFactor, gapThresholdSec){
+    if(!frames.length || durSec <= 0) return { perId:[], bins:[], load:[], loadAvg:0, loadPeak:0, busOff:[], binsT0:0 };
     let t0 = frames[0].t;
     for(const f of frames) if(f.t < t0) t0 = f.t;
+
+    // gap detection doesn't need a bit rate, so compute it before any
+    // baudrate-conditional early return below
+    const busOff = detectBusOffGaps(frames, gapThresholdSec);
 
     const byId = new Map();
     for(const f of frames){ if(!byId.has(f.id)) byId.set(f.id, []); byId.get(f.id).push(f.t); }
@@ -746,7 +1100,7 @@
 
     // per-ID timing above is exact and doesn't need a bit rate — load % does,
     // so skip it cleanly rather than dividing by a bogus/zero rate
-    if(!baudrate || baudrate <= 0) return { perId, bins:[], load:[], loadAvg:0, loadPeak:0 };
+    if(!baudrate || baudrate <= 0) return { perId, bins:[], load:[], loadAvg:0, loadPeak:0, busOff, binsT0:t0 };
 
     const windowSec = 1.0;
     const nBins = Math.max(1, Math.ceil(durSec / windowSec));
@@ -767,137 +1121,128 @@
     const bins = Array.from({length:nBins}, (_,i)=> i*windowSec);
     const loadAvg = load.reduce((a,b)=>a+b,0) / load.length;
     const loadPeak = arrMax(load);
-    return { perId, bins, load, loadAvg, loadPeak };
+    return { perId, bins, load, loadAvg, loadPeak, busOff, binsT0:t0 };
   }
 
-  function paintBusHealth(){
-    const durSec = (trimEnd ?? logDur) - (trimStart ?? 0);
-    const baudrate = parseFloat(baudrateInp.value) || 0;
-    const fr = windowFrames(allFrames);
-    const errs = windowErrors(allErrors);
-    const health = evaluateBusHealth(fr, durSec, baudrate, STUFF_FACTOR);
-    window.__lastHealth = health; window.__lastErrors = errs; window.__lastBaudrate = baudrate;
-
-    const warnings = [];
-    const overload = health.loadPeak > 100;
-    if(!baudrate){
-      warnings.push(`Bus bit rate is unknown — it wasn't declared in the log header or a loaded DBC, and `+
-        `couldn't be extracted. Enter it above (e.g. 500000) to see estimated bus load %. Per-ID timing `+
-        `below doesn't need it.`);
-    } else {
-      if(dbcBaudrate && Math.abs(baudrate - dbcBaudrate) > Math.max(1, 0.01 * dbcBaudrate)){
-        warnings.push(`DBC declares ${(dbcBaudrate/1000).toFixed(0)} kbit/s (BS_:) but this analysis is `+
-          `using ${(baudrate/1000).toFixed(0)} kbit/s — bus-load numbers below assume the wrong speed unless that's intentional.`);
-      }
-      if(overload){
-        warnings.push(`Estimated peak bus load is ${health.loadPeak.toFixed(0)}%, which is impossible on a real `+
-          `bus — the assumed baud rate (${(baudrate/1000).toFixed(0)} kbit/s) is very likely too low for this `+
-          `trace. Try the next standard speed up (e.g. 250000, 500000, 1000000).`);
-      } else if(health.loadPeak > 85){
-        warnings.push(`Estimated peak bus load is ${health.loadPeak.toFixed(0)}% — very high for a real bus. `+
-          `Not impossible, but worth double-checking the assumed baud rate (${(baudrate/1000).toFixed(0)} kbit/s) `+
-          `is actually correct.`);
-      }
-    }
-    window.__lastDbcBaudrate = dbcBaudrate;
-    healthWarnings.innerHTML = warnings.map(w=>`<div class="warnbox">⚠ ${escHtml(w)}</div>`).join('');
-
-    healthTiles.innerHTML = baudrate ? `
-      <div class="itile"><span class="ik">Avg bus load (est.)</span><span class="iv">${health.loadAvg.toFixed(2)}%</span></div>
-      <div class="itile"><span class="ik">Peak bus load (est.)</span><span class="iv${overload?' warn':''}">${health.loadPeak.toFixed(2)}%</span></div>
-      <div class="itile"><span class="ik">Error frames</span><span class="iv${errs.length?' warn':''}">${errs.length}</span></div>` : `
-      <div class="itile"><span class="ik">Avg bus load (est.)</span><span class="iv">—</span></div>
-      <div class="itile"><span class="ik">Peak bus load (est.)</span><span class="iv">—</span></div>
-      <div class="itile"><span class="ik">Error frames</span><span class="iv${errs.length?' warn':''}">${errs.length}</span></div>`;
-
-    healthCharts.forEach(c=>c.destroy()); healthCharts = [];
-    if(health.bins.length){
-      busLoadBlock.style.display = '';
-      const tc = themeColors();
-      const chart = new Chart(busLoadCanvas, {
-        type:'line',
-        data:{ datasets:[{ data: health.bins.map((t,i)=>({x:t,y:health.load[i]})), borderColor:'#d9483b', backgroundColor:'#d9483b1f', fill:true, pointRadius:0, borderWidth:1.4, tension:0.15 }] },
-        options:{ responsive:true, maintainAspectRatio:false, animation:false, parsing:false,
-          plugins:{ legend:{ display:false } },
-          scales:{ x:{ type:'linear', title:{display:true,text:'t (s)', color:tc.tick, font:{size:9}}, grid:{color:tc.grid}, ticks:{color:tc.tick, font:{size:9}} },
-                    y:{ title:{display:true,text:'load %', color:tc.tick, font:{size:9}}, grid:{color:tc.grid}, ticks:{color:tc.tick, font:{size:9}} } } }
-      });
-      healthCharts.push(chart);
-    } else {
-      busLoadBlock.style.display = 'none';
-    }
-
-    if(health.perId.length){
-      const tbl = document.createElement('table');
-      tbl.innerHTML = '<thead><tr><th>ID</th><th>Message</th><th>Count</th><th>Hz</th><th>Avg gap (ms)</th><th>Max gap (ms)</th><th>Dropout?</th></tr></thead>';
-      const tbody = document.createElement('tbody');
-      health.perId.forEach(r=>{
-        const tr = document.createElement('tr');
-        tr.innerHTML = `<td>0x${r.id.toString(16).toUpperCase()}</td><td>${escHtml(r.name)}</td><td>${r.count}</td>
-          <td>${r.hz.toFixed(2)}</td><td>${r.avgGapMs.toFixed(1)}</td><td>${r.maxGapMs.toFixed(1)}</td>
-          <td class="${r.dropout?'warn':''}">${r.dropout?'YES':'—'}</td>`;
-        tbody.appendChild(tr);
-      });
-      tbl.appendChild(tbody);
-      perIdWrap.innerHTML = ''; perIdWrap.appendChild(tbl);
-    } else {
-      perIdWrap.innerHTML = '<div class="empty">No frames in this window.</div>';
-    }
-
-    if(errs.length){
-      const counts = {};
-      errs.forEach(e=> counts[e.kind] = (counts[e.kind]||0) + 1);
-      errorTypesWrap.style.display = '';
-      const tbl = document.createElement('table');
-      tbl.innerHTML = '<thead><tr><th>Type</th><th>Count</th></tr></thead>';
-      const tbody = document.createElement('tbody');
-      Object.entries(counts).sort((a,b)=>b[1]-a[1]).forEach(([kind,n])=>{
-        const tr = document.createElement('tr');
-        tr.innerHTML = `<td>${escHtml(kind)}</td><td>${n}</td>`;
-        tbody.appendChild(tr);
-      });
-      tbl.appendChild(tbody);
-      errorTypesTable.innerHTML = ''; errorTypesTable.appendChild(tbl);
-    } else {
-      errorTypesWrap.style.display = 'none';
-    }
+  function gapAnnotations(busOff, t0, colorHex){
+    const out = {};
+    busOff.forEach((g,i)=>{
+      out['gap'+i] = { type:'box', xMin: g.startT - t0, xMax: g.endT - t0,
+                       backgroundColor: colorHex, borderWidth:0, drawTime:'beforeDatasetsDraw' };
+    });
+    return out;
   }
 
-  // ── checklist ────────────────────────────────────────────
+  function buildBusLoadChartConfig(health, tc){
+    return { type:'line',
+      data:{ datasets:[{ data: health.bins.map((t,i)=>({x:t,y:health.load[i]})), borderColor:'#d9483b', backgroundColor:'#d9483b1f', fill:true, pointRadius:0, borderWidth:1.4, tension:0.15 }] },
+      options:{ responsive:true, maintainAspectRatio:false, animation:false, parsing:false,
+        plugins:{ legend:{ display:false },
+          annotation:{ annotations: gapAnnotations(health.busOff, health.binsT0, tc.warn+'2e') },
+          zoom: zoomPluginOptions() },
+        scales:{ x:{ type:'linear', min:0, max: arrMax(health.bins)||undefined, title:{display:true,text:'t (s)', color:tc.tick, font:{size:9}}, grid:{color:tc.grid}, ticks:{color:tc.tick, font:{size:9}} },
+                  y:{ title:{display:true,text:'load %', color:tc.tick, font:{size:9}}, grid:{color:tc.grid}, ticks:{color:tc.tick, font:{size:9}} } } } };
+  }
+  // ── checkbox tree: one .can-group per CAN ID, signals nested inside ──
   function paintSignalChecklist(matched){
     currentMatched = matched;
     checklistWrap.innerHTML = '';
     if(matched.length === 0){
       checklistWrap.innerHTML = '<div class="empty">No DBC message IDs matched the log.</div>';
       sigActions.style.display = 'none';
+      selectionSummary.style.display = 'none';
       return;
     }
     sigActions.style.display = '';
+    selectionSummary.style.display = '';
+    const groups = new Map();   // msgId -> [sig, ...]  (insertion order preserved)
+    matched.forEach(sig=>{
+      if(!groups.has(sig.msgId)) groups.set(sig.msgId, []);
+      groups.get(sig.msgId).push(sig);
+    });
     const list = document.createElement('div');
     list.className = 'checklist';
-    matched.forEach(sig=>{
-      const row = document.createElement('label');
-      row.className = 'checkrow';
-      const idHex = '0x'+sig.msgId.toString(16).toUpperCase().padStart(3,'0');
-      row.innerHTML = `<input type="checkbox" checked data-sig="${escHtml(sig.name)}">
-        <span class="id">${idHex}</span><span class="name">${escHtml(sig.name)}</span>
-        <span class="n">${sig.points.length} pts</span>`;
-      list.appendChild(row);
+    let gi = 0;
+    groups.forEach((sigs, msgId)=>{
+      const idHex = '0x'+msgId.toString(16).toUpperCase().padStart(3,'0');
+      const name = frameNameById[msgId] || '';
+      const bodyId = 'canGroupBody' + gi;
+      const group = document.createElement('div');
+      group.className = 'can-group';
+      group.dataset.msgId = String(msgId);
+      const head = document.createElement('div');
+      head.className = 'can-group-head';
+      head.innerHTML = `<label class="checkrow parent">
+          <input type="checkbox" checked data-group="${msgId}" aria-label="Select all ${escHtml(name||idHex)} signals">
+          <span class="id">${idHex}</span><span class="message-name">${escHtml(name)}</span>
+          <span class="n">${sigs.length} signal${sigs.length===1?'':'s'}</span>
+        </label>
+        <button class="caret" type="button" aria-expanded="true" aria-controls="${bodyId}" aria-label="Collapse ${escHtml(name||idHex)}">▾</button>`;
+      const body = document.createElement('div');
+      body.className = 'can-group-body';
+      body.id = bodyId;
+      sigs.forEach(sig=>{
+        const row = document.createElement('label');
+        row.className = 'checkrow child';
+        row.innerHTML = `<input type="checkbox" checked data-sig="${escHtml(sig.name)}">
+          <span class="message-name">${escHtml(sig.name)}</span>
+          <span class="n">${escHtml(sig.unit||'')} · ${sig.points.length} pts</span>`;
+        body.appendChild(row);
+      });
+      group.appendChild(head); group.appendChild(body);
+      list.appendChild(group);
+      gi++;
     });
     checklistWrap.appendChild(list);
-    list.querySelectorAll('input[type=checkbox]').forEach(cb=>{
-      cb.addEventListener('change', ()=> paintSelection(matched));
+    syncGroupCheckboxes();
+    updateSelectionSummary();
+  }
+  // native indeterminate state on the parent checkbox — no custom
+  // partial-state glyphs needed
+  function syncGroupCheckboxes(){
+    checklistWrap.querySelectorAll('.can-group').forEach(group=>{
+      const parentCb = group.querySelector('[data-group]');
+      const childCbs = Array.from(group.querySelectorAll('[data-sig]'));
+      const checkedCount = childCbs.filter(c=>c.checked).length;
+      parentCb.checked = childCbs.length > 0 && checkedCount === childCbs.length;
+      parentCb.indeterminate = checkedCount > 0 && checkedCount < childCbs.length;
     });
   }
+  function updateSelectionSummary(){
+    const total = checklistWrap.querySelectorAll('[data-sig]').length;
+    const checked = checklistWrap.querySelectorAll('[data-sig]:checked').length;
+    selectionSummary.innerHTML = `<strong>${checked} of ${total}</strong> signals selected`;
+  }
+  checklistWrap.addEventListener('change', e=>{
+    if(e.target.matches('[data-group]')){
+      const group = e.target.closest('.can-group');
+      group.querySelectorAll('[data-sig]').forEach(cb=> cb.checked = e.target.checked);
+    }
+    syncGroupCheckboxes();
+    updateSelectionSummary();
+    paintSelection(currentMatched);
+  });
+  checklistWrap.addEventListener('click', e=>{
+    const caret = e.target.closest('.caret');
+    if(!caret) return;
+    const body = document.getElementById(caret.getAttribute('aria-controls'));
+    body.hidden = !body.hidden;
+    caret.setAttribute('aria-expanded', String(!body.hidden));
+    caret.textContent = body.hidden ? '▸' : '▾';
+    caret.setAttribute('aria-label', caret.getAttribute('aria-label').replace(/^(Expand|Collapse)/, body.hidden ? 'Expand' : 'Collapse'));
+  });
   function setAllChecked(checked){
-    checklistWrap.querySelectorAll('input[type=checkbox]').forEach(cb=> cb.checked = checked);
+    // include collapsed groups too — [hidden] children are still in the DOM
+    checklistWrap.querySelectorAll('[data-sig]').forEach(cb=> cb.checked = checked);
+    syncGroupCheckboxes();
+    updateSelectionSummary();
     paintSelection(currentMatched);
   }
   selectAllBtn.addEventListener('click', ()=> setAllChecked(true));
   deselectAllBtn.addEventListener('click', ()=> setAllChecked(false));
   function activeSignals(matched){
     const active = new Set();
-    checklistWrap.querySelectorAll('input[type=checkbox]').forEach(b=>{ if(b.checked) active.add(b.dataset.sig); });
+    checklistWrap.querySelectorAll('[data-sig]').forEach(b=>{ if(b.checked) active.add(b.dataset.sig); });
     return matched.filter(s=>active.has(s.name));
   }
 
@@ -940,6 +1285,7 @@
     updateTrimInfo();
     paintSelection(currentMatched);
     paintBusHealth();
+    drawOverlay();
   }
   trimApply.addEventListener('click', applyTrim);
   [trimStartInp, trimEndInp].forEach(el=> el.addEventListener('keydown', e=>{ if(e.key==='Enter') applyTrim(); }));
@@ -949,16 +1295,31 @@
     updateTrimInfo();
     paintSelection(currentMatched);
     paintBusHealth();
+    drawOverlay();
   });
   baudrateInp.addEventListener('input', ()=>{ baudrateSource = 'user'; });
   baudrateInp.addEventListener('change', ()=>{ if(allFrames.length) paintBusHealth(); });
+  gapThresholdInp.addEventListener('change', ()=>{
+    let v = parseFloat(gapThresholdInp.value);
+    if(!(v > 0)){ v = GAP_THRESHOLD_DEFAULT; gapThresholdInp.value = String(v); }
+    if(allFrames.length) paintBusHealth();
+  });
 
   // ── stats table + charts (only for CHECKED signals) ─────
+  function buildSignalChartConfig(s, pts, colorHex, tc){
+    return { type:'line',
+      data:{ datasets:[{ data: pts.map(p=>({x:+(p.t-logT0).toFixed(4), y:p.v})), borderColor:colorHex, backgroundColor:colorHex+'22', fill:true, pointRadius:0, borderWidth:1.4, tension:0.1 }] },
+      options:{ responsive:true, maintainAspectRatio:false, animation:false, parsing:false,
+        plugins:{ legend:{ display:false }, zoom: zoomPluginOptions() },
+        scales:{ x:{ type:'linear', title:{display:true,text:'t (s)', color:tc.tick, font:{size:9}}, grid:{color:tc.grid}, ticks:{color:tc.tick, font:{size:9}} },
+                  y:{ grid:{color:tc.grid}, ticks:{color:tc.tick, font:{size:9}} } } } };
+  }
   function paintSelection(matched){
     const sel = activeSignals(matched);
     if(sel.length === 0){
       statsWrap.innerHTML = '<div class="empty">No signals ticked.</div>';
       chartsWrap.innerHTML = '<div class="empty">No signals ticked.</div>';
+      charts.forEach(c=>c.destroy()); charts = [];
       return;
     }
     const tbl = document.createElement('table');
@@ -980,24 +1341,271 @@
     chartsWrap.innerHTML = '';
     const tc = themeColors();
     sel.slice(0, 24).forEach((s, i)=>{
-      const pts = thin(windowPoints(s.points), 2000);
-      if(!pts.length) return;
+      const fullPts = windowPoints(s.points);
+      if(!fullPts.length) return;
+      const pts = thin(fullPts, 2000);
+      const col = palette[i % palette.length];
+      const liveVal = fullPts[fullPts.length - 1].v;
       const card = document.createElement('div');
       card.className = 'chartcard';
-      card.innerHTML = `<div class="ctitle"><b>${escHtml(s.name)}</b><span>${escHtml(s.unit||'')}</span></div><canvas></canvas>`;
+      card.innerHTML = `<div class="ctitle">
+          <div class="ctitle-txt"><b title="${escHtml(s.name)}">${escHtml(s.name)}</b>${escHtml(s.unit||'')}</div>
+          <div class="chart-tools">
+            <button class="icon-btn" data-reset-zoom aria-label="Reset ${escHtml(s.name)} zoom" title="Reset zoom">⤺</button>
+            <button class="icon-btn" data-expand aria-label="Expand ${escHtml(s.name)}" title="Expand chart">⛶</button>
+          </div>
+        </div>
+        <div class="signal-current" style="color:${col}">${liveVal.toFixed(Math.abs(liveVal)<10?3:1)}<small>${escHtml(s.unit||'')} · last in window</small></div>
+        <canvas></canvas>`;
       chartsWrap.appendChild(card);
       const ctx = card.querySelector('canvas');
-      const col = palette[i % palette.length];
-      const chart = new Chart(ctx, {
-        type:'line',
-        data:{ datasets:[{ data: pts.map(p=>({x:+(p.t-logT0).toFixed(4), y:p.v})), borderColor:col, backgroundColor:col+'22', fill:true, pointRadius:0, borderWidth:1.4, tension:0.1 }] },
-        options:{ responsive:true, maintainAspectRatio:false, animation:false, parsing:false,
-          plugins:{ legend:{ display:false } },
-          scales:{ x:{ type:'linear', title:{display:true,text:'t (s)', color:tc.tick, font:{size:9}}, grid:{color:tc.grid}, ticks:{color:tc.tick, font:{size:9}} },
-                    y:{ grid:{color:tc.grid}, ticks:{color:tc.tick, font:{size:9}} } } }
-      });
+      const chart = new Chart(ctx, buildSignalChartConfig(s, pts, col, tc));
+      chart.$meta = { title: s.name + (s.unit ? '  ['+s.unit+']' : ''), build: ()=> buildSignalChartConfig(s, thin(windowPoints(s.points), 4000), col, themeColors()) };
       charts.push(chart);
     });
+  }
+  chartsWrap.addEventListener('click', e=>{
+    const card = e.target.closest('.chartcard');
+    if(!card) return;
+    const canvas = card.querySelector('canvas');
+    const chart = charts.find(c=>c.canvas === canvas);
+    if(!chart) return;
+    if(e.target.closest('[data-reset-zoom]')) chart.resetZoom && chart.resetZoom();
+    if(e.target.closest('[data-expand]')) openChartModal(chart.$meta.title, chart.$meta.build());
+  });
+
+  // ── custom graph: overlay 2-4 signals on one chart, independent y-axes
+  // (or a shared 0-1 axis when normalized) — mirrors the desktop app's
+  // Overlay tab ──
+  function populateOverlaySelects(matched){
+    const opts = ['<option value="">— none —</option>']
+      .concat(matched.map(s=>`<option value="${escHtml(s.name)}">${escHtml(s.name)}</option>`)).join('');
+    ovSelects.forEach((sel, i)=>{
+      sel.innerHTML = opts;
+      sel.value = (i < 2 && matched[i]) ? matched[i].name : '';
+    });
+  }
+  function currentOverlaySignals(){
+    const seen = new Set(); const chosen = [];
+    for(const sel of ovSelects){
+      const n = sel.value;
+      if(!n || seen.has(n)) continue;
+      const s = currentMatched.find(x=>x.name === n);
+      if(s){ seen.add(n); chosen.push(s); }
+    }
+    return chosen;
+  }
+  function buildOverlayChartConfig(chosen, normalize, tc){
+    const datasets = []; const scales = {};
+    chosen.forEach((s, i)=>{
+      const col = palette[i % palette.length];
+      const pts = thin(windowPoints(s.points), 4000);
+      if(normalize){
+        const vals = pts.map(p=>p.v);
+        const mn = arrMin(vals), mx = arrMax(vals), rng = (mx - mn) || 1;
+        datasets.push({ label: s.name, data: pts.map(p=>({x:+(p.t-logT0).toFixed(4), y:(p.v-mn)/rng})),
+          borderColor:col, backgroundColor:'transparent', pointRadius:0, borderWidth:1.4, tension:0.1, yAxisID:'y' });
+      } else {
+        const axisId = 'y'+i;
+        datasets.push({ label: s.name + (s.unit?' ['+s.unit+']':''), data: pts.map(p=>({x:+(p.t-logT0).toFixed(4), y:p.v})),
+          borderColor:col, backgroundColor:'transparent', pointRadius:0, borderWidth:1.4, tension:0.1, yAxisID:axisId });
+        scales[axisId] = { type:'linear', position: i % 2 === 0 ? 'left' : 'right',
+          grid:{ drawOnChartArea: i===0, color:tc.grid }, ticks:{ color:col, font:{size:9} },
+          title:{ display:true, text:s.unit||s.name, color:col, font:{size:9} } };
+      }
+    });
+    if(normalize) scales.y = { title:{display:true,text:'normalized 0–1', color:tc.tick, font:{size:9}}, grid:{color:tc.grid}, ticks:{color:tc.tick, font:{size:9}} };
+    scales.x = { type:'linear', title:{display:true,text:'t (s)', color:tc.tick, font:{size:9}}, grid:{color:tc.grid}, ticks:{color:tc.tick, font:{size:9}} };
+    return { type:'line', data:{ datasets },
+      options:{ responsive:true, maintainAspectRatio:false, animation:false, parsing:false,
+        plugins:{ legend:{ display:true, labels:{ color:tc.tick, font:{size:9}, boxWidth:12 } }, zoom: zoomPluginOptions() },
+        scales } };
+  }
+  function drawOverlay(){
+    overlayChart && overlayChart.destroy(); overlayChart = null;
+    const chosen = currentOverlaySignals();
+    if(chosen.length < 2){
+      overlayBlock.style.display = 'none'; overlayHint.style.display = 'none';
+      overlayEmpty.style.display = ''; overlayEmpty.textContent = 'Pick 2–4 signals above, then Plot.';
+      return;
+    }
+    overlayBlock.style.display = ''; overlayHint.style.display = ''; overlayEmpty.style.display = 'none';
+    overlayChart = new Chart(overlayCanvas, buildOverlayChartConfig(chosen, ovNormalize.checked, themeColors()));
+  }
+  ovPlotBtn.addEventListener('click', drawOverlay);
+  ovNormalize.addEventListener('change', drawOverlay);
+  document.querySelector('[data-reset-zoom="overlayCanvas"]').addEventListener('click', ()=>{
+    overlayChart && overlayChart.resetZoom && overlayChart.resetZoom();
+  });
+  document.querySelector('[data-expand="overlayCanvas"]').addEventListener('click', ()=>{
+    const chosen = currentOverlaySignals();
+    if(chosen.length < 2) return;
+    openChartModal('Custom graph — signal overlay', buildOverlayChartConfig(chosen, ovNormalize.checked, themeColors()));
+  });
+
+  // ── expanded-chart modal (own Chart instance, destroyed on close) ──
+  function openChartModal(title, config){
+    if(!chartReady){ log('Zoom/expand needs the chart plugins, which failed to load (offline?).', 'dim'); return; }
+    modalReturnFocus = document.activeElement;
+    chartModalTitle.textContent = title;
+    chartModalCanvas.setAttribute('aria-label', 'Expanded ' + title);
+    chartModal.style.display = 'grid';
+    document.querySelector('main').inert = true;
+    document.querySelector('.sidebar').inert = true;
+    document.body.style.overflow = 'hidden';
+    modalChart && modalChart.destroy();
+    modalChart = new Chart(chartModalCanvas, config);
+    closeModalBtn.focus();
+  }
+  function closeChartModal(){
+    if(chartModal.style.display === 'none') return;
+    modalChart && modalChart.destroy(); modalChart = null;
+    chartModal.style.display = 'none';
+    document.querySelector('main').inert = false;
+    document.querySelector('.sidebar').inert = false;
+    document.body.style.overflow = '';
+    modalReturnFocus && modalReturnFocus.focus && modalReturnFocus.focus();
+  }
+  chartModal.addEventListener('click', e=>{ if(e.target.closest('[data-close-modal]')) closeChartModal(); });
+  document.addEventListener('keydown', e=>{
+    if(chartModal.style.display === 'none') return;
+    if(e.key === 'Escape'){ closeChartModal(); return; }
+    if(e.key === 'Tab'){
+      const buttons = Array.from(chartModal.querySelectorAll('button'));
+      const first = buttons[0], last = buttons[buttons.length-1];
+      if(e.shiftKey && document.activeElement === first){ e.preventDefault(); last.focus(); }
+      else if(!e.shiftKey && document.activeElement === last){ e.preventDefault(); first.focus(); }
+    }
+  });
+  document.getElementById('busLoadBlock').addEventListener('click', e=>{
+    if(e.target.closest('[data-reset-zoom="busLoadCanvas"]')){
+      const c = healthCharts[0]; c && c.resetZoom && c.resetZoom();
+    }
+    if(e.target.closest('[data-expand="busLoadCanvas"]')){
+      const health = window.__lastHealth;
+      if(health && health.bins.length) openChartModal('Bus load over time (estimated)', buildBusLoadChartConfig(health, themeColors()));
+    }
+  });
+  function paintBusHealth(){
+    const durSec = (trimEnd == null ? logDur : trimEnd) - (trimStart == null ? 0 : trimStart);
+    const baudrate = parseFloat(baudrateInp.value) || 0;
+    let gapThreshold = parseFloat(gapThresholdInp.value);
+    if(!(gapThreshold > 0)) gapThreshold = GAP_THRESHOLD_DEFAULT;
+    const fr = windowFrames(allFrames);
+    const errs = windowErrors(allErrors);
+    const health = evaluateBusHealth(fr, durSec, baudrate, STUFF_FACTOR, gapThreshold);
+    window.__lastHealth = health; window.__lastErrors = errs; window.__lastBaudrate = baudrate;
+    window.__lastGapThreshold = gapThreshold;
+
+    const warnings = [];
+    const overload = health.loadPeak > 100;
+    if(!baudrate){
+      warnings.push(`Bus bit rate is unknown — it wasn't declared in the log header or a loaded DBC, and `+
+        `couldn't be extracted. Enter it above (e.g. 500000) to see estimated bus load %. Per-ID timing `+
+        `and BUS-OFF/Power-OFF detection below don't need it.`);
+    } else {
+      if(dbcBaudrate && Math.abs(baudrate - dbcBaudrate) > Math.max(1, 0.01 * dbcBaudrate)){
+        warnings.push(`DBC declares ${(dbcBaudrate/1000).toFixed(0)} kbit/s (BS_:) but this analysis is `+
+          `using ${(baudrate/1000).toFixed(0)} kbit/s — bus-load numbers below assume the wrong speed unless that's intentional.`);
+      }
+      if(overload){
+        warnings.push(`Estimated peak bus load is ${health.loadPeak.toFixed(0)}%, which is impossible on a real `+
+          `bus — the assumed baud rate (${(baudrate/1000).toFixed(0)} kbit/s) is very likely too low for this `+
+          `trace. Try the next standard speed up (e.g. 250000, 500000, 1000000).`);
+      } else if(health.loadPeak > 85){
+        warnings.push(`Estimated peak bus load is ${health.loadPeak.toFixed(0)}% — very high for a real bus. `+
+          `Not impossible, but worth double-checking the assumed baud rate (${(baudrate/1000).toFixed(0)} kbit/s) `+
+          `is actually correct.`);
+      }
+    }
+    if(health.busOff.length){
+      warnings.push(`${health.busOff.length} BUS-OFF / Power-OFF gap(s) — no frame of any ID for longer than `+
+        `${gapThreshold.toFixed(1)}s. Silence alone is a suspected interruption, not a confirmed bus-off — see `+
+        `the table below for exact times.`);
+    }
+    window.__lastDbcBaudrate = dbcBaudrate;
+    healthWarnings.innerHTML = warnings.map(w=>`<div class="warnbox">⚠ ${escHtml(w)}</div>`).join('');
+
+    healthTiles.innerHTML = `
+      <div class="gauge-card"><span class="gauge-label"><span class="ico">◔</span>Avg bus load</span>
+        <div class="gauge-canvas-wrap"><canvas id="gaugeAvgLoad"></canvas></div>
+        <span class="gauge-foot">est. · assumes ${baudrate ? (baudrate/1000).toFixed(0)+' kbit/s' : 'no bit rate'}</span></div>
+      <div class="gauge-card"><span class="gauge-label"><span class="ico">◔</span>Peak bus load</span>
+        <div class="gauge-canvas-wrap"><canvas id="gaugePeakLoad"></canvas></div>
+        <span class="gauge-foot">${overload ? 'over 100% — bit rate too low?' : 'est. peak in this window'}</span></div>
+      <div class="itile"><span class="ik"><span class="ico">▲</span>Error frames</span><span class="iv${errs.length?' warn':''}">${errs.length}</span><span class="ifoot">recognized error-frame lines</span></div>
+      <div class="itile"><span class="ik"><span class="ico">⏻</span>BUS-OFF / Power-OFF</span><span class="iv${health.busOff.length?' warn':''}">${health.busOff.length}</span><span class="ifoot">gap${health.busOff.length===1?'':'s'} > ${gapThreshold.toFixed(1)}s</span></div>`;
+
+    healthGaugeCharts.forEach(c=>c.destroy()); healthGaugeCharts = [];
+    if(baudrate){
+      healthGaugeCharts.push(renderGauge($('gaugeAvgLoad'), health.loadAvg, 100, health.loadAvg.toFixed(1)+'%'));
+      healthGaugeCharts.push(renderGauge($('gaugePeakLoad'), health.loadPeak, 100, health.loadPeak.toFixed(1)+'%'));
+    } else {
+      healthGaugeCharts.push(renderGauge($('gaugeAvgLoad'), 0, 100, '—'));
+      healthGaugeCharts.push(renderGauge($('gaugePeakLoad'), 0, 100, '—'));
+    }
+
+    healthCharts.forEach(c=>c.destroy()); healthCharts = [];
+    if(health.bins.length){
+      busLoadBlock.style.display = '';
+      const tc = themeColors();
+      const chart = new Chart(busLoadCanvas, buildBusLoadChartConfig(health, tc));
+      healthCharts.push(chart);
+    } else {
+      busLoadBlock.style.display = 'none';
+    }
+
+    if(health.perId.length){
+      const tbl = document.createElement('table');
+      tbl.innerHTML = '<thead><tr><th>ID</th><th>Message</th><th>Count</th><th>Hz</th><th>Avg gap (ms)</th><th>Max gap (ms)</th><th>Dropout?</th></tr></thead>';
+      const tbody = document.createElement('tbody');
+      health.perId.forEach(r=>{
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>0x${r.id.toString(16).toUpperCase()}</td><td>${escHtml(r.name)}</td><td>${r.count}</td>
+          <td>${r.hz.toFixed(2)}</td><td>${r.avgGapMs.toFixed(1)}</td><td>${r.maxGapMs.toFixed(1)}</td>
+          <td class="${r.dropout?'warn':''}">${r.dropout?'YES':'—'}</td>`;
+        tbody.appendChild(tr);
+      });
+      tbl.appendChild(tbody);
+      perIdWrap.innerHTML = ''; perIdWrap.appendChild(tbl);
+    } else {
+      perIdWrap.innerHTML = '<div class="empty">No frames in this window.</div>';
+    }
+
+    if(errs.length){
+      const counts = {};
+      errs.forEach(e=> counts[e.kind] = (counts[e.kind]||0) + 1);
+      errorTypesWrap.style.display = '';
+      const tbl = document.createElement('table');
+      tbl.innerHTML = '<thead><tr><th>Type</th><th>Count</th></tr></thead>';
+      const tbody = document.createElement('tbody');
+      Object.entries(counts).sort((a,b)=>b[1]-a[1]).forEach(([kind,n])=>{
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${escHtml(kind)}</td><td>${n}</td>`;
+        tbody.appendChild(tr);
+      });
+      tbl.appendChild(tbody);
+      errorTypesTable.innerHTML = ''; errorTypesTable.appendChild(tbl);
+    } else {
+      errorTypesWrap.style.display = 'none';
+    }
+
+    busOffOuterWrap.style.display = '';
+    gapCountBadge.textContent = `${health.busOff.length} gap${health.busOff.length===1?'':'s'} > ${gapThreshold.toFixed(1)}s`;
+    if(health.busOff.length){
+      const tbl = document.createElement('table');
+      tbl.innerHTML = '<thead><tr><th>Start</th><th>End</th><th>Duration (s)</th></tr></thead>';
+      const tbody = document.createElement('tbody');
+      health.busOff.forEach(g=>{
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${g.startClock}</td><td>${g.endClock}</td><td class="warn">${g.duration.toFixed(2)}</td>`;
+        tbody.appendChild(tr);
+      });
+      tbl.appendChild(tbody);
+      busOffWrap.innerHTML = ''; busOffWrap.appendChild(tbl);
+    } else {
+      busOffWrap.innerHTML = '<div class="empty">No gaps exceed the threshold — frames were present continuously throughout this window.</div>';
+    }
   }
 
   // ── theme ────────────────────────────────────────────────
@@ -1008,11 +1616,38 @@
     document.querySelectorAll('#themeSwitch button').forEach(b=>b.classList.toggle('active', b===btn));
     if(currentMatched.length) paintSelection(currentMatched);
     if(allFrames.length) paintBusHealth();
+    drawOverlay();
   });
 
+  // ── sidebar stage navigation ───────────────────────────────
+  const STAGE_IDS = ['01','02','03','04','05','06'];
+  let activeStage = '01';
+  function showStage(stage){
+    if(STAGE_IDS.indexOf(stage) < 0) return;
+    activeStage = stage;
+    document.querySelectorAll('.section-panel').forEach(s=>{ s.hidden = s.id !== 'stage'+stage; });
+    document.querySelectorAll('.nav-item').forEach(b=>{
+      const on = b.dataset.stage === stage;
+      b.classList.toggle('active', on);
+      if(on) b.setAttribute('aria-current','page'); else b.removeAttribute('aria-current');
+    });
+    // charts created while their tab was hidden can end up 0-height —
+    // nudge them to size correctly now that the panel is visible
+    requestAnimationFrame(()=>{
+      charts.forEach(c=>{ if(c.canvas.offsetParent) c.resize(); });
+      healthCharts.forEach(c=>{ if(c.canvas.offsetParent) c.resize(); });
+      healthGaugeCharts.forEach(c=>{ if(c.canvas.offsetParent) c.resize(); });
+      if(overlayChart && overlayChart.canvas.offsetParent) overlayChart.resize();
+    });
+  }
+  document.querySelectorAll('[data-stage]').forEach(el=>{
+    el.addEventListener('click', e=>{ e.preventDefault(); showStage(el.dataset.stage); });
+  });
+  showStage('01');
   // ── run (decode) ─────────────────────────────────────────
   runBtn.addEventListener('click', ()=>{
     clearLog();
+    showStage('02');
     trimStart = null; trimEnd = null;
     trimBar.style.display = 'none';
 
@@ -1051,6 +1686,9 @@
     messages.forEach(m=> frameNameById[m.id] = m.name);
     if(!allFrames.length){ log('No frames parsed from the log.', 'err'); return; }
     log(`Detected ${parsed.meta.format} — ${allFrames.length} frame(s) (${parsed.counts.std} std, ${parsed.counts.ext} ext, ${parsed.counts.malformed} skipped, ${allErrors.length} error frame(s)).`, 'info');
+    if(logMeta.note) log(logMeta.note, 'dim');
+    logFormatBadge.textContent = parsed.meta.format;
+    logFormatRow.style.display = '';
 
     const { series, matchedMsgs } = buildSignalSeries(allFrames, messages);
     log(`Decoded ${series.length} signal(s) from ${matchedMsgs.length} message ID(s).`, 'info');
@@ -1067,6 +1705,8 @@
 
     paintSignalChecklist(series);
     paintSelection(series);
+    populateOverlaySelects(series);
+    drawOverlay();
     if(!parseFloat(baudrateInp.value)){
       const ans = window.prompt("Bus bit rate wasn't found in the log header or a DBC.\n"+
         'Enter it in bit/s (e.g. 500000, 250000, 125000) — Cancel to skip bus load %:', '');
@@ -1079,9 +1719,13 @@
       }
     }
     paintBusHealth();
+    if(window.__lastHealth && window.__lastHealth.busOff.length){
+      log(`BUS-OFF/Power-OFF: ${window.__lastHealth.busOff.length} gap(s) > ${window.__lastGapThreshold.toFixed(1)}s — see the Bus Health stage.`, 'info');
+    }
     downloadBtn.disabled = series.length === 0;
+    log('Done. See Signals Decoded / Stats / Bus Health / Charts in the sidebar.', 'info');
+    showStage('03');
   });
-
   // ── export .xlsx ─────────────────────────────────────────
   function uniqueSheetName(name, used){
     let n = String(name).replace(/[:\\/?*\[\]]/g,' ').trim().slice(0,31) || 'Signal';
@@ -1097,7 +1741,7 @@
       await new Promise(r=>setTimeout(r,0));
     }
   }
-  function drawReportChart(title, captionText, dataPts, colorHex){
+  function drawReportChart(title, captionText, dataPts, colorHex, annotations){
     const off = document.createElement('canvas');
     off.width = 1240; off.height = 460;
     const chart = new Chart(off, {
@@ -1105,7 +1749,7 @@
       data:{ datasets:[{ data: dataPts, borderColor:colorHex, backgroundColor:colorHex+'22', fill:true, pointRadius:0, borderWidth:2, tension:0.12 }] },
       options:{ responsive:false, animation:false, parsing:false,
         layout:{ padding:{ top:46, bottom:36, left:8, right:24 } },
-        plugins:{ legend:{ display:false } },
+        plugins:{ legend:{ display:false }, annotation: annotations ? { annotations } : undefined },
         scales:{ x:{ type:'linear', grid:{color:'#e4e4e4'}, ticks:{color:'#333', font:{size:12}} },
                   y:{ grid:{color:'#e4e4e4'}, ticks:{color:'#333', font:{size:12}} } } },
       plugins:[{
@@ -1137,14 +1781,16 @@
       const t0 = logT0;
       const tol = parseFloat(tolInput.value) || 0.1;
       const baudrate = window.__lastBaudrate || parseFloat(baudrateInp.value) || 0;
-      const health = window.__lastHealth || evaluateBusHealth(framesV, logDur, baudrate, STUFF_FACTOR);
+      const gapThreshold = window.__lastGapThreshold || parseFloat(gapThresholdInp.value) || GAP_THRESHOLD_DEFAULT;
+      const health = window.__lastHealth || evaluateBusHealth(framesV, logDur, baudrate, STUFF_FACTOR, gapThreshold);
       const errs = window.__lastErrors || windowErrors(allErrors);
+      const busOff = health.busOff || [];
       const wb = new ExcelJS.Workbook();
       const usedNames = new Set();
 
       const infoSheet = wb.addWorksheet(uniqueSheetName('Log Info', usedNames));
       const trimmed = (trimStart != null || trimEnd != null);
-      const trimText = trimmed ? `${(trimStart||0).toFixed(3)}-${(trimEnd ?? logDur).toFixed(3)} s` : 'full log';
+      const trimText = trimmed ? `${(trimStart||0).toFixed(3)}-${(trimEnd == null ? logDur : trimEnd).toFixed(3)} s` : 'full log';
       [
         ['Format', logMeta.format], ['Date', logMeta.date], ['Start time', logMeta.start],
         ['End time', logMeta.end], ['Duration', logMeta.duration], ['Trim window', trimText],
@@ -1167,7 +1813,7 @@
       const rateMismatch = baudrate && dbcRate && Math.abs(baudrate - dbcRate) > Math.max(1, 0.01 * dbcRate);
       const overload = baudrate && health.loadPeak > 100;
       if(!baudrate){
-        healthSheet.addRow([`⚠ Bus bit rate is unknown — bus load % below is unavailable. Per-ID timing doesn't need it.`]);
+        healthSheet.addRow([`⚠ Bus bit rate is unknown — bus load % below is unavailable. Per-ID timing and BUS-OFF/Power-OFF detection don't need it.`]);
         healthSheet.lastRow.font = { bold:true, color:{ argb:'FFCC0000' } };
       }
       if(rateMismatch){
@@ -1178,7 +1824,11 @@
         healthSheet.addRow([`⚠ Estimated peak bus load is ${health.loadPeak.toFixed(0)}% — impossible on a real bus; the assumed baud rate is very likely too low.`]);
         healthSheet.lastRow.font = { bold:true, color:{ argb:'FFCC0000' } };
       }
-      if(!baudrate || rateMismatch || overload) healthSheet.addRow([]);
+      if(busOff.length){
+        healthSheet.addRow([`⚠ ${busOff.length} BUS-OFF / Power-OFF gap(s) detected — no frame of any ID for longer than ${gapThreshold.toFixed(1)}s. See the table below for exact times.`]);
+        healthSheet.lastRow.font = { bold:true, color:{ argb:'FFCC0000' } };
+      }
+      if(!baudrate || rateMismatch || overload || busOff.length) healthSheet.addRow([]);
       const summaryRows = [
         ['Baud rate assumed', baudrate ? `${(baudrate/1000).toFixed(0)} kbit/s` : 'unknown'],
       ];
@@ -1189,6 +1839,8 @@
         ['Peak bus load (est.)', baudrate ? `${health.loadPeak.toFixed(2)} %` : 'n/a'],
         ['Unique message IDs seen', health.perId.length],
         ['Total error frames', errs.length],
+        ['BUS-OFF / Power-OFF gap threshold', `${gapThreshold.toFixed(1)} s`],
+        ['BUS-OFF / Power-OFF gaps', busOff.length],
       );
       summaryRows.forEach(r=>{ healthSheet.addRow(r); healthSheet.lastRow.getCell(1).font = { bold:true }; });
       healthSheet.addRow([]);
@@ -1214,12 +1866,25 @@
         healthSheet.addRow(['Time_s','Type','Raw line']); healthSheet.lastRow.font = { bold:true };
         errs.slice(0,5000).forEach(e=> healthSheet.addRow([+(e.t-t0).toFixed(4), e.kind, e.raw]));
       }
+      healthSheet.addRow([]);
+      healthSheet.addRow([`BUS-OFF / Power-OFF Events  (no frames of any ID for > ${gapThreshold.toFixed(1)} s)`]);
+      healthSheet.lastRow.font = { bold:true };
+      if(busOff.length){
+        healthSheet.addRow(['Start','End','Duration (s)','Start t (s)','End t (s)']);
+        healthSheet.lastRow.font = { bold:true };
+        busOff.forEach(g=> healthSheet.addRow([g.startClock, g.endClock, +g.duration.toFixed(3),
+          +(g.startT-t0).toFixed(3), +(g.endT-t0).toFixed(3)]));
+      } else {
+        healthSheet.addRow(['None detected — frames were present continuously throughout the trace.']);
+      }
       if(health.bins.length){
         setProg('Bus load chart…');
         await new Promise(r=>setTimeout(r,0));
-        const dataUrl = drawReportChart('Bus load over time (estimated)',
+        const annotations = {};
+        busOff.forEach((g,i)=>{ annotations['gap'+i] = { type:'box', xMin:g.startT-health.binsT0, xMax:g.endT-health.binsT0, backgroundColor:'#e8433d2e', borderWidth:0 }; });
+        const dataUrl = drawReportChart('Bus load over time (estimated) — red = BUS-OFF/Power-OFF',
           `avg ${health.loadAvg.toFixed(2)}%  ·  peak ${health.loadPeak.toFixed(2)}%  ·  assumed ${(baudrate/1000).toFixed(0)} kbit/s`,
-          health.bins.map((t,i)=>({x:t,y:health.load[i]})), '#d33333');
+          health.bins.map((t,i)=>({x:t,y:health.load[i]})), '#d33333', annotations);
         const imgId = wb.addImage({ base64:dataUrl, extension:'png' });
         healthSheet.addImage(imgId, { tl:{ col:9, row:1 }, ext:{ width:620, height:230 } });
       }
@@ -1338,6 +2003,7 @@
     }
   });
 })();
+
 </script>
 </body>
 </html>

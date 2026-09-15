@@ -73,18 +73,20 @@ except Exception as exc:                                   # pragma: no cover
     sys.exit(1)
 
 
-PALETTE = ["#f0a92a", "#2bb8d8", "#e05cc8", "#46c66a", "#5aa9ff", "#ff6d5e",
-           "#9b8cff", "#c9cf3a"]
+PALETTE = ["#5b8cff", "#2bd6b0", "#f2a93b", "#ef5f8a", "#9b6bff", "#38c6e8",
+           "#d9d048", "#6bd68a"]
 THEMES = {
-    "dark": dict(bg="#0d1219", panel="#171e2b", well="#10161f", ink="#eaf0f7",
-                 muted="#8ea0b5", faint="#5f7086", accent="#4c9ffa", accent2="#2a6fd6",
-                 line="#2b3748", grid="#223143", entry="#0c1119", sel="#1d4e86",
-                 head="#111825", stripe="#141c28"),
-    "light": dict(bg="#eaeef3", panel="#ffffff", well="#f4f7fb", ink="#16202e",
-                  muted="#586a7e", faint="#8595a7", accent="#0b63d6", accent2="#0a4fac",
-                  line="#d7dee7", grid="#e4eaf1", entry="#ffffff", sel="#cfe2ff",
-                  head="#f0f3f8", stripe="#f6f9fc"),
+    "dark": dict(bg="#0a0e15", panel="#131a26", well="#0c111a", ink="#eef3fa",
+                 muted="#8b9bb0", faint="#57687d", accent="#5b8cff", accent2="#3866d6",
+                 line="#232e3d", grid="#1d2836", entry="#0a0f17", sel="#1f3f6e",
+                 head="#0c1220", stripe="#111927", warn="#ff6b5e"),
+    "light": dict(bg="#f2f4f8", panel="#ffffff", well="#f6f8fb", ink="#141c28",
+                  muted="#57687c", faint="#8697aa", accent="#3568e6", accent2="#264fbb",
+                  line="#dbe1e9", grid="#e9edf3", entry="#ffffff", sel="#d9e5fb",
+                  head="#eef1f7", stripe="#f5f7fb", warn="#d1453a"),
 }
+
+_CHK_ON, _CHK_OFF, _CHK_PART = "☑", "☐", "⊟"
 
 SECTIONS = [
     ("bus_health", "Bus Health (per-ID timing, load %)"),
@@ -113,7 +115,8 @@ class App:
         self.trim_a = self.trim_b = None
         self.span = None
         self.busy = False
-        self.sig_vars = []
+        self.sig_checked = []
+        self._sig_leaf_index, self._sig_parent_of = {}, {}
         self.bus_health = None
 
         root.title("CAN Signal Bench")
@@ -154,10 +157,12 @@ class App:
 
     # ── layout ──────────────────────────────────────────────────────────────
     def _build_ui(self):
-        self.header = tk.Frame(self.root, height=54)
+        self.header = tk.Frame(self.root, height=58)
         self.header.pack(fill="x"); self.header.pack_propagate(False)
-        self.h_title = tk.Label(self.header, text="  CAN Signal Bench",
-                                font=("Segoe UI", 17, "bold"), anchor="w")
+        self.header_accent = tk.Frame(self.root, height=3)
+        self.header_accent.pack(fill="x")
+        self.h_title = tk.Label(self.header, text="  ⏣ CAN Signal Bench",
+                                font=("Segoe UI Semibold", 18, "bold"), anchor="w")
         self.h_title.pack(side="left", padx=6)
         self.h_sub = tk.Label(self.header, text="DBC-guided decode · dynamics · report",
                               font=("Segoe UI", 10))
@@ -245,19 +250,19 @@ class App:
         paned = ttk.Panedwindow(p, orient="horizontal"); paned.pack(fill="both", expand=True)
         lf = ttk.Frame(paned, style="Card.TFrame", padding=8); paned.add(lf, weight=0)
         hdr = ttk.Frame(lf, style="Card.TFrame"); hdr.pack(fill="x")
-        ttk.Label(hdr, text="SIGNALS", style="Head.TLabel").pack(side="left")
+        ttk.Label(hdr, text="SIGNALS  (by CAN ID)", style="Head.TLabel").pack(side="left")
         ttk.Button(hdr, text="All", width=4, style="Ghost.TButton", command=lambda: self._select_all(True)).pack(side="right")
         ttk.Button(hdr, text="None", width=5, style="Ghost.TButton", command=lambda: self._select_all(False)).pack(side="right", padx=4)
+        ttk.Label(lf, text="Click a CAN ID to toggle all its signals, or a signal to toggle just that one.",
+                 style="Dim.TLabel", wraplength=290, justify="left").pack(anchor="w", pady=(2, 4))
 
-        wrap = ttk.Frame(lf, style="Card.TFrame"); wrap.pack(fill="both", expand=True, pady=(6, 0))
-        self.sig_canvas = tk.Canvas(wrap, highlightthickness=0, width=290)
-        sb = ttk.Scrollbar(wrap, orient="vertical", command=self.sig_canvas.yview)
-        self.sig_inner = ttk.Frame(self.sig_canvas, style="Card.TFrame")
-        self.sig_inner.bind("<Configure>", lambda e: self.sig_canvas.configure(scrollregion=self.sig_canvas.bbox("all")))
-        self.sig_canvas.create_window((0, 0), window=self.sig_inner, anchor="nw")
-        self.sig_canvas.configure(yscrollcommand=sb.set)
-        self.sig_canvas.pack(side="left", fill="both", expand=True); sb.pack(side="right", fill="y")
-        self.sig_canvas.bind_all("<MouseWheel>", self._on_wheel)
+        wrap = ttk.Frame(lf, style="Card.TFrame"); wrap.pack(fill="both", expand=True, pady=(2, 0))
+        self.sig_tree = ttk.Treeview(wrap, show="tree", selectmode="none", height=22)
+        sb = ttk.Scrollbar(wrap, orient="vertical", command=self.sig_tree.yview)
+        self.sig_tree.configure(yscrollcommand=sb.set)
+        self.sig_tree.column("#0", width=290, stretch=True)
+        self.sig_tree.pack(side="left", fill="both", expand=True); sb.pack(side="right", fill="y")
+        self.sig_tree.bind("<Button-1>", self._on_sig_tree_click)
 
         sf = ttk.Frame(paned, style="TFrame"); paned.add(sf, weight=1)
         cols = ("unit", "n", "min", "max", "mean", "std")
@@ -276,8 +281,13 @@ class App:
         self.canvas_tr = FigureCanvasTkAgg(self.fig_tr, master=p)
         self.canvas_tr.get_tk_widget().pack(fill="both", expand=True)
         NavigationToolbar2Tk(self.canvas_tr, p)
-        ttk.Label(p, text="Tip: drag across the plot to select a time window.",
-                  style="Dim.TLabel").pack(anchor="w", padx=6, pady=(0, 4))
+        self._bind_interactive(self.canvas_tr)
+        tip = ttk.Frame(p, style="TFrame"); tip.pack(fill="x")
+        ttk.Label(tip, text="Left-drag: select a trim window  ·  Right-drag: pan  ·  "
+                            "Scroll wheel: zoom  ·  toolbar 🔍/✋: box-zoom / pan",
+                  style="Dim.TLabel").pack(side="left", padx=6, pady=(0, 4))
+        ttk.Button(tip, text="⛶ Expand", style="Ghost.TButton",
+                  command=lambda: self._expand_figure("traces")).pack(side="right", padx=6)
 
     def _build_overlay_tab(self, p):
         ctrl = ttk.Frame(p, style="Card.TFrame", padding=8); ctrl.pack(fill="x")
@@ -290,10 +300,13 @@ class App:
         ttk.Checkbutton(ctrl, text="Normalize 0–1", variable=self.ov_norm, style="Card.TCheckbutton",
                         command=self.draw_overlay).grid(row=0, column=6, padx=8)
         ttk.Button(ctrl, text="Plot", style="Accent.TButton", command=self.draw_overlay).grid(row=0, column=7)
+        ttk.Button(ctrl, text="⛶ Expand", style="Ghost.TButton",
+                  command=lambda: self._expand_figure("overlay")).grid(row=0, column=8, padx=(6, 0))
         self.fig_ov = Figure(figsize=(7, 4.4), dpi=100)
         self.canvas_ov = FigureCanvasTkAgg(self.fig_ov, master=p)
         self.canvas_ov.get_tk_widget().pack(fill="both", expand=True)
         NavigationToolbar2Tk(self.canvas_ov, p)
+        self._bind_interactive(self.canvas_ov)
 
     def _build_bus_health_tab(self, p):
         top = ttk.Frame(p, style="TFrame"); top.pack(fill="x")
@@ -303,10 +316,14 @@ class App:
         ttk.Label(optc, text="Bus bit rate (bit/s)", style="Card.TLabel").grid(row=1, column=0, sticky="w", pady=2)
         self.bus_baud = ttk.Entry(optc, width=12)
         self.bus_baud.grid(row=1, column=1, padx=(10, 0))
-        ttk.Label(optc, text="Auto-filled from the log header when\nBUSMASTER recorded it; otherwise you'll\nbe asked for it.",
-                 style="Dim.TLabel", justify="left").grid(row=2, column=0, columnspan=2, sticky="w", pady=(2, 6))
+        ttk.Label(optc, text="Gap threshold (s)", style="Card.TLabel").grid(row=2, column=0, sticky="w", pady=2)
+        self.gap_threshold_entry = ttk.Entry(optc, width=12)
+        self.gap_threshold_entry.insert(0, "2.0")
+        self.gap_threshold_entry.grid(row=2, column=1, padx=(10, 0))
+        ttk.Label(optc, text="Bit rate auto-fills from the log header\nwhen BUSMASTER recorded it, otherwise\nyou'll be asked. Gap threshold flags\nBUS-OFF/Power-OFF: silence across ALL\nIDs longer than this.",
+                 style="Dim.TLabel", justify="left").grid(row=3, column=0, columnspan=2, sticky="w", pady=(2, 6))
         ttk.Button(optc, text="Analyze bus health  ⚙", style="Accent.TButton",
-                  command=self.compute_bus_health).grid(row=3, column=0, columnspan=2, sticky="ew")
+                  command=self.compute_bus_health).grid(row=4, column=0, columnspan=2, sticky="ew")
 
         tiles = ttk.Frame(top, style="Card.TFrame", padding=10); tiles.pack(side="left", fill="y", padx=(0, 10))
         ttk.Label(tiles, text="ESTIMATE", style="Head.TLabel").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
@@ -319,6 +336,9 @@ class App:
         ttk.Label(tiles, text="Unique IDs", style="Card.TLabel").grid(row=3, column=0, sticky="w", pady=2)
         self.bus_ids_lbl = ttk.Label(tiles, text="—", style="Mono.TLabel")
         self.bus_ids_lbl.grid(row=3, column=1, sticky="w", padx=(10, 0))
+        ttk.Label(tiles, text="BUS-OFF/Power-OFF", style="Card.TLabel").grid(row=4, column=0, sticky="w", pady=2)
+        self.bus_off_lbl = ttk.Label(tiles, text="—", style="Mono.TLabel")
+        self.bus_off_lbl.grid(row=4, column=1, sticky="w", padx=(10, 0))
 
         notec = ttk.Frame(top, style="Card.TFrame", padding=10); notec.pack(side="left", fill="both", expand=True)
         ttk.Label(notec, text="HOW LOAD % IS CALCULATED", style="Head.TLabel").pack(anchor="w", pady=(0, 6))
@@ -330,17 +350,30 @@ class App:
         mid = ttk.Panedwindow(p, orient="horizontal"); mid.pack(fill="both", expand=True, pady=(10, 0))
         rf = ttk.Frame(mid, style="TFrame"); mid.add(rf, weight=1)
         cols = ("count", "hz", "avg", "max", "dropout")
-        self.bus_tree = ttk.Treeview(rf, columns=cols, show="tree headings", height=16)
+        self.bus_tree = ttk.Treeview(rf, columns=cols, show="tree headings", height=12)
         self.bus_tree.heading("#0", text="ID  ·  Message"); self.bus_tree.column("#0", width=220, anchor="w")
         for cc, label, w in (("count", "Count", 70), ("hz", "Hz", 70), ("avg", "Avg gap (ms)", 100),
                              ("max", "Max gap (ms)", 100), ("dropout", "Dropout?", 80)):
             self.bus_tree.heading(cc, text=label); self.bus_tree.column(cc, width=w, anchor="e")
         self.bus_tree.pack(fill="both", expand=True)
 
+        ttk.Label(rf, text="BUS-OFF / Power-OFF events (no frames of any ID for longer than the gap threshold)",
+                 style="Dim.TLabel").pack(anchor="w", pady=(8, 2))
+        gap_cols = ("end", "duration")
+        self.gap_tree = ttk.Treeview(rf, columns=gap_cols, show="tree headings", height=5)
+        self.gap_tree.heading("#0", text="Start"); self.gap_tree.column("#0", width=140, anchor="w")
+        self.gap_tree.heading("end", text="End"); self.gap_tree.column("end", width=140, anchor="w")
+        self.gap_tree.heading("duration", text="Duration (s)"); self.gap_tree.column("duration", width=100, anchor="e")
+        self.gap_tree.pack(fill="x")
+
         pf = ttk.Frame(mid, style="TFrame"); mid.add(pf, weight=1)
+        bus_head = ttk.Frame(pf, style="TFrame"); bus_head.pack(fill="x")
+        ttk.Button(bus_head, text="⛶ Expand", style="Ghost.TButton",
+                  command=lambda: self._expand_figure("bus")).pack(side="right")
         self.fig_bus = Figure(figsize=(6, 3.8), dpi=100)
         self.canvas_bus = FigureCanvasTkAgg(self.fig_bus, master=pf)
         self.canvas_bus.get_tk_widget().pack(fill="both", expand=True)
+        self._bind_interactive(self.canvas_bus)
         # see the matching comment in _build_signals_tab — without an
         # explicit sash position this pane can start almost collapsed.
         self.root.after(80, lambda: mid.sashpos(0, 480))
@@ -390,6 +423,7 @@ class App:
         st = self.style
         self.root.configure(bg=c["bg"])
         self.header.configure(bg=c["head"])
+        self.header_accent.configure(bg=c["accent"])
         self.h_title.configure(bg=c["head"], fg=c["ink"])
         self.h_sub.configure(bg=c["head"], fg=c["faint"])
 
@@ -432,10 +466,10 @@ class App:
                                 highlightbackground=c["line"], highlightcolor=c["line"])
         self.console.configure(bg=c["well"], fg=c["muted"], insertbackground=c["ink"], highlightbackground=c["line"])
         self.rep_desc.configure(bg=c["well"], fg=c["ink"], insertbackground=c["ink"], highlightbackground=c["line"])
-        self.sig_canvas.configure(bg=c["panel"])
-        for tv in (self.stats, self.bus_tree):
+        for tv in (self.stats, self.bus_tree, self.sig_tree, self.gap_tree):
             tv.tag_configure("odd", background=c["panel"])
             tv.tag_configure("even", background=c["stripe"])
+        self.sig_tree.tag_configure("parent", background=c["well"], foreground=c["accent"])
         for fig in (self.fig_tr, self.fig_ov, self.fig_bus):
             fig.set_facecolor(c["panel"])
         self._redraw_all()
@@ -450,13 +484,77 @@ class App:
         ax.xaxis.label.set_color(c["muted"]); ax.yaxis.label.set_color(c["muted"])
         ax.title.set_color(c["ink"])
 
-    # ── misc ────────────────────────────────────────────────────────────────
-    def _on_wheel(self, e):
-        try:
-            self.sig_canvas.yview_scroll(int(-e.delta / 120), "units")
-        except Exception:
-            pass
+    # ── graph interaction: scroll-wheel zoom + right-drag pan ─────────────────
+    # (left-drag is reserved on the Traces tab for the trim-window SpanSelector;
+    # the toolbar's own Pan/Zoom buttons keep working independently of this)
+    def _bind_interactive(self, canvas):
+        state = {"press": None}
 
+        def on_scroll(event):
+            ax = event.inaxes
+            if ax is None or event.xdata is None or event.ydata is None:
+                return
+            scale = 1 / 1.2 if event.step > 0 else 1.2
+            xd, yd = event.xdata, event.ydata
+            x0, x1 = ax.get_xlim(); y0, y1 = ax.get_ylim()
+            ax.set_xlim(xd - (xd - x0) * scale, xd + (x1 - xd) * scale)
+            ax.set_ylim(yd - (yd - y0) * scale, yd + (y1 - yd) * scale)
+            canvas.draw_idle()
+
+        def on_press(event):
+            if event.button != 3 or event.inaxes is None or event.x is None:
+                return
+            ax = event.inaxes
+            state["press"] = (event.x, event.y, ax, ax.get_xlim(), ax.get_ylim())
+
+        def on_motion(event):
+            press = state["press"]
+            if press is None or event.x is None:
+                return
+            x0, y0, ax, xlim0, ylim0 = press
+            inv = ax.transData.inverted()
+            x0d, y0d = inv.transform((x0, y0))
+            x1d, y1d = inv.transform((event.x, event.y))
+            dx, dy = x0d - x1d, y0d - y1d
+            ax.set_xlim(xlim0[0] + dx, xlim0[1] + dx)
+            ax.set_ylim(ylim0[0] + dy, ylim0[1] + dy)
+            canvas.draw_idle()
+
+        def on_release(event):
+            state["press"] = None
+
+        canvas.mpl_connect("scroll_event", on_scroll)
+        canvas.mpl_connect("button_press_event", on_press)
+        canvas.mpl_connect("motion_notify_event", on_motion)
+        canvas.mpl_connect("button_release_event", on_release)
+
+    def _expand_figure(self, which):
+        """Pop the Traces / Overlay / Bus Health chart into a bigger window
+        with its own toolbar and the same scroll-zoom / right-drag-pan —
+        a snapshot of the current selection, not a live mirror."""
+        if not self.series_all:
+            return
+        top = tk.Toplevel(self.root)
+        top.title("CAN Signal Bench — Expanded view (snapshot)")
+        top.geometry("1180x760")
+        c = THEMES[self.theme]
+        top.configure(bg=c["bg"])
+        fig = Figure(figsize=(11, 7), dpi=100)
+        fig.set_facecolor(c["panel"])
+        canvas = FigureCanvasTkAgg(fig, master=top)
+        canvas.get_tk_widget().pack(fill="both", expand=True)
+        NavigationToolbar2Tk(canvas, top)
+        self._bind_interactive(canvas)
+        ttk.Label(top, text="Snapshot — close and click “⛶ Expand” again to refresh after "
+                            "changing the selection or trim.").pack(anchor="w", padx=8, pady=(0, 6))
+        if which == "traces":
+            self.draw_traces(fig=fig, canvas=canvas, enable_span=False)
+        elif which == "overlay":
+            self.draw_overlay(fig=fig, canvas=canvas)
+        elif which == "bus":
+            self._draw_bus_plot(fig=fig, canvas=canvas)
+
+    # ── misc ────────────────────────────────────────────────────────────────
     def log(self, msg):
         self.console.configure(state="normal")
         self.console.insert("end", msg + "\n"); self.console.see("end")
@@ -574,13 +672,16 @@ class App:
         self.messages, self.frames, self.meta = res["messages"], res["frames"], res["meta"]
         self.frame_name_by_id = {m["id"]: m["name"] for m in self.messages}
         self.series_all = res["series"]
-        fmt_label = "IXXAT MiniMon CSV" if res["fmt"] == "minimon" else "BUSMASTER"
+        fmt_label = {"minimon": "IXXAT MiniMon CSV", "candump": "candump (SocketCAN)"}.get(
+            res["fmt"], "BUSMASTER")
         c = res["counts"]
         self.log(f"Detected {fmt_label} — {len(self.frames)} frames "
                  f"({c['std']} std, {c['ext']} ext, {c['malformed']} skipped).")
         if res["dups"]:
             self.log(f"{res['dups']} duplicate ID(s) across DBCs — kept first.")
         self.log(f"Decoded {len(self.series_all)} signal(s) from {len(res['matched'])} message ID(s).")
+        if self.meta.get("note"):
+            self.log("Note: " + self.meta["note"])
 
         ts = np.fromiter((f.t for f in self.frames), float, len(self.frames))
         self.log_t0 = float(ts.min()); self.log_dur = float(ts.max()) - self.log_t0
@@ -588,8 +689,11 @@ class App:
         self.bus_health = None
         for r in self.bus_tree.get_children():
             self.bus_tree.delete(r)
+        for r in self.gap_tree.get_children():
+            self.gap_tree.delete(r)
         self.bus_avg_lbl.configure(text="—"); self.bus_peak_lbl.configure(text="—")
-        self.bus_ids_lbl.configure(text="—"); self.bus_warn_lbl.configure(text="")
+        self.bus_ids_lbl.configure(text="—"); self.bus_off_lbl.configure(text="—")
+        self.bus_warn_lbl.configure(text="")
         self.bus_baud.delete(0, "end")
         detected_baud = self.meta.get("baudrate")
         if detected_baud:
@@ -618,26 +722,91 @@ class App:
         for k, lbl in self.info_vals.items():
             lbl.configure(text=d.get(k, "—"))
 
-    # ── checkbox signal list ────────────────────────────────────────────────
+    # ── checkbox signal tree (CAN ID -> signals) ────────────────────────────
     def _build_checklist(self):
-        for w in self.sig_inner.winfo_children():
-            w.destroy()
-        self.sig_vars = []
-        for s in self.series_all:
-            var = tk.BooleanVar(value=True)
-            unit = f" [{s['unit']}]" if s["unit"] else ""
-            txt = f"0x{s['msg_id']:X}  {s['name']}{unit}  ({len(s['t'])})"
-            ttk.Checkbutton(self.sig_inner, text=txt, variable=var, style="Card.TCheckbutton",
-                            command=self._on_sig_select).pack(anchor="w", fill="x")
-            self.sig_vars.append(var)
+        tree = self.sig_tree
+        for iid in tree.get_children(""):
+            tree.delete(iid)
+        self.sig_checked = [True] * len(self.series_all)
+        self._sig_leaf_index = {}     # iid -> index into series_all
+        self._sig_leaf_label = {}     # iid -> base label (no checkbox glyph)
+        self._sig_parent_of = {}      # iid -> msg_id
+        self._sig_parent_iid = {}     # msg_id -> iid
+        self._sig_children_of = {}    # msg_id -> [index, ...]
+
+        groups, order = {}, []
+        for i, s in enumerate(self.series_all):
+            if s["msg_id"] not in groups:
+                groups[s["msg_id"]] = []
+                order.append(s["msg_id"])
+            groups[s["msg_id"]].append(i)
+
+        for j, msg_id in enumerate(order):
+            idxs = groups[msg_id]
+            self._sig_children_of[msg_id] = idxs
+            plabel = f"0x{msg_id:X}  {self.frame_name_by_id.get(msg_id, '')}".rstrip()
+            pid = tree.insert("", "end", text=f"{_CHK_ON} {plabel}", open=True,
+                              tags=("parent",))
+            self._sig_parent_of[pid] = msg_id
+            self._sig_parent_iid[msg_id] = pid
+            for k, i in enumerate(idxs):
+                s = self.series_all[i]
+                unit = f" [{s['unit']}]" if s["unit"] else ""
+                label = f"{s['name']}{unit}  ({len(s['t'])})"
+                iid = tree.insert(pid, "end", text=f"    {_CHK_ON} {label}",
+                                  tags=("even" if k % 2 else "odd",))
+                self._sig_leaf_index[iid] = i
+                self._sig_leaf_label[iid] = label
+
+    def _on_sig_tree_click(self, event):
+        tree = self.sig_tree
+        if "indicator" in tree.identify("element", event.x, event.y):
+            return   # clicked the expand/collapse arrow — leave that to the default binding
+        iid = tree.identify_row(event.y)
+        if not iid:
+            return
+        if iid in self._sig_leaf_index:
+            i = self._sig_leaf_index[iid]
+            self.sig_checked[i] = not self.sig_checked[i]
+            self._refresh_leaf(iid)
+            self._refresh_parent(self.series_all[i]["msg_id"])
+        elif iid in self._sig_parent_of:
+            msg_id = self._sig_parent_of[iid]
+            idxs = self._sig_children_of[msg_id]
+            new_state = not all(self.sig_checked[i] for i in idxs)
+            for i in idxs:
+                self.sig_checked[i] = new_state
+            for cid in tree.get_children(iid):
+                self._refresh_leaf(cid)
+            self._refresh_parent(msg_id)
+        else:
+            return
+        self._on_sig_select()
+
+    def _refresh_leaf(self, iid):
+        i = self._sig_leaf_index[iid]
+        glyph = _CHK_ON if self.sig_checked[i] else _CHK_OFF
+        self.sig_tree.item(iid, text=f"    {glyph} {self._sig_leaf_label[iid]}")
+
+    def _refresh_parent(self, msg_id):
+        pid = self._sig_parent_iid[msg_id]
+        states = [self.sig_checked[i] for i in self._sig_children_of[msg_id]]
+        glyph = _CHK_ON if all(states) else (_CHK_OFF if not any(states) else _CHK_PART)
+        plabel = f"0x{msg_id:X}  {self.frame_name_by_id.get(msg_id, '')}".rstrip()
+        self.sig_tree.item(pid, text=f"{glyph} {plabel}")
 
     def _select_all(self, on):
-        for v in self.sig_vars:
-            v.set(on)
+        if not self.series_all:
+            return
+        self.sig_checked = [on] * len(self.series_all)
+        for iid in self._sig_leaf_index:
+            self._refresh_leaf(iid)
+        for msg_id in self._sig_parent_iid:
+            self._refresh_parent(msg_id)
         self._on_sig_select()
 
     def selected_series(self):
-        return [s for s, v in zip(self.series_all, self.sig_vars) if v.get()]
+        return [s for s, checked in zip(self.series_all, self.sig_checked) if checked]
 
     def _on_sig_select(self):
         self.draw_stats(); self.draw_traces(); self._update_report_note()
@@ -742,15 +911,17 @@ class App:
                                       f"{st['max']:.4f}", f"{st['mean']:.4f}", f"{st['std']:.4f}"))
             i += 1
 
-    def draw_traces(self):
-        fig = self.fig_tr; fig.clear()
+    def draw_traces(self, fig=None, canvas=None, enable_span=True):
+        fig = fig or self.fig_tr
+        canvas = canvas or self.canvas_tr
+        fig.clear()
         c = THEMES[self.theme]; fig.set_facecolor(c["panel"])
         sel = [s for s in self.selected_series() if len(self._trim_points(s)[1])]
         if not sel:
             ax = fig.add_subplot(111); self._style_ax(ax)
             ax.text(0.5, 0.5, "Tick one or more signals", ha="center", va="center",
                     color=c["muted"], transform=ax.transAxes)
-            self.canvas_tr.draw(); return
+            canvas.draw(); return
         sel = sel[:8]
         axes = fig.subplots(len(sel), 1, sharex=True, squeeze=False)[:, 0]
         for ax, s, col in zip(axes, sel, PALETTE):
@@ -761,17 +932,23 @@ class App:
             self._style_ax(ax)
         axes[-1].set_xlabel("t (s)")
         fig.tight_layout()
-        self.span = SpanSelector(axes[-1], self._on_span, "horizontal", useblit=True,
-                                 props=dict(alpha=0.18, facecolor=c["accent"]), interactive=False)
-        self.canvas_tr.draw()
+        if enable_span:
+            # left-drag = pick a trim window; right-drag (see _bind_interactive) is
+            # reserved for panning, so restrict this selector to the left button only
+            self.span = SpanSelector(axes[-1], self._on_span, "horizontal", useblit=True,
+                                     props=dict(alpha=0.18, facecolor=c["accent"]),
+                                     interactive=False, button=[1])
+        canvas.draw()
 
     def _on_span(self, xmin, xmax):
         if xmax - xmin < 1e-6 or not self.log_dur:
             return
         self._set_trim(self._clamp(xmin), self._clamp(xmax))
 
-    def draw_overlay(self, keep=False):
-        fig = self.fig_ov; fig.clear()
+    def draw_overlay(self, keep=False, fig=None, canvas=None):
+        fig = fig or self.fig_ov
+        canvas = canvas or self.canvas_ov
+        fig.clear()
         c = THEMES[self.theme]; fig.set_facecolor(c["panel"])
         chosen, seen = [], set()
         for cb in self.ov_combos:
@@ -785,7 +962,7 @@ class App:
         if len(chosen) < 2:
             ax0.text(0.5, 0.5, "Pick 2–4 signals, then Plot", ha="center", va="center",
                      color=c["muted"], transform=ax0.transAxes)
-            self.canvas_ov.draw(); return
+            canvas.draw(); return
         normalize = self.ov_norm.get(); lines = []
         for i, s in enumerate(chosen):
             t, v = self._trim_points(s); t, v = decimate(t - self.log_t0, v)
@@ -806,7 +983,7 @@ class App:
         if normalize:
             ax0.set_ylabel("normalized 0–1")
         ax0.legend(lines, [ln.get_label() for ln in lines], fontsize=8, loc="upper right")
-        fig.tight_layout(); self.canvas_ov.draw()
+        fig.tight_layout(); canvas.draw()
 
     # ── bus health ──────────────────────────────────────────────────────────
     def _trimmed_frames(self):
@@ -840,6 +1017,14 @@ class App:
                 return b
             messagebox.showwarning("CAN Signal Bench", "Enter a positive number, e.g. 500000.")
 
+    @staticmethod
+    def _parse_gap_threshold(txt, default=2.0):
+        try:
+            v = float(txt)
+            return v if v > 0 else default
+        except (ValueError, TypeError):
+            return default
+
     def compute_bus_health(self):
         if not self.frames:
             return
@@ -849,29 +1034,36 @@ class App:
             if baud is None:
                 return
             self.bus_baud.delete(0, "end"); self.bus_baud.insert(0, str(int(baud)))
+        gap_threshold = self._parse_gap_threshold(self.gap_threshold_entry.get())
         fv = self._trimmed_frames()
         dur = (self.trim_b if self.trim_b is not None else self.log_dur) - (self.trim_a or 0.0)
         if not fv or dur <= 0:
             messagebox.showwarning("CAN Signal Bench", "No frames in this window.")
             return
-        health = core.analyze_bus_health(fv, dur, self.frame_name_by_id, baudrate=baud)
+        health = core.analyze_bus_health(fv, dur, self.frame_name_by_id, baudrate=baud,
+                                         gap_threshold_sec=gap_threshold)
         health["baudrate"] = baud
         self.bus_health = health
         self._fill_bus_tree(health)
+        self._fill_gap_tree(health)
         self._draw_bus_plot(health)
         self.bus_avg_lbl.configure(text=f"{health['load_avg']:.2f} %")
         self.bus_peak_lbl.configure(text=f"{health['load_peak']:.2f} %")
         self.bus_ids_lbl.configure(text=str(len(health["per_id"])))
+        self.bus_off_lbl.configure(text=str(len(health["bus_off"])))
         overload = health["load_peak"] > 100.0
+        warn_lines = []
         if overload:
-            self.bus_warn_lbl.configure(
-                text=f"⚠ Peak load {health['load_peak']:.0f}% is impossible on a real bus — "
-                     f"the assumed bit rate is very likely too low. Try the next standard "
-                     f"speed up (e.g. 250000, 500000, 1000000).")
-        else:
-            self.bus_warn_lbl.configure(text="")
+            warn_lines.append(f"⚠ Peak load {health['load_peak']:.0f}% is impossible on a real bus — "
+                              f"the assumed bit rate is very likely too low. Try the next standard "
+                              f"speed up (e.g. 250000, 500000, 1000000).")
+        if health["bus_off"]:
+            warn_lines.append(f"⚠ {len(health['bus_off'])} BUS-OFF / Power-OFF gap(s) — no frames of "
+                              f"any ID for over {gap_threshold:g}s. See the table below for exact times.")
+        self.bus_warn_lbl.configure(text="\n".join(warn_lines))
         self.log(f"Bus health: {len(health['per_id'])} ID(s) — avg {health['load_avg']:.2f}% / "
-                f"peak {health['load_peak']:.2f}% (assumed {baud/1000:.0f} kbit/s).")
+                f"peak {health['load_peak']:.2f}% (assumed {baud/1000:.0f} kbit/s). "
+                f"BUS-OFF/Power-OFF: {len(health['bus_off'])} gap(s) > {gap_threshold:g}s.")
 
     def _fill_bus_tree(self, health):
         for r in self.bus_tree.get_children():
@@ -882,8 +1074,19 @@ class App:
                                  values=(r["count"], f"{r['hz']:.2f}", f"{r['avg_gap_ms']:.1f}",
                                          f"{r['max_gap_ms']:.1f}", "YES" if r["dropout"] else "—"))
 
-    def _draw_bus_plot(self, health=None):
-        fig = self.fig_bus; fig.clear()
+    def _fill_gap_tree(self, health):
+        for r in self.gap_tree.get_children():
+            self.gap_tree.delete(r)
+        for i, g in enumerate(health["bus_off"]):
+            self.gap_tree.insert("", "end", text=g["start_clock"], tags=("even" if i % 2 else "odd",),
+                                 values=(g["end_clock"], f"{g['duration']:.2f}"))
+        if not health["bus_off"]:
+            self.gap_tree.insert("", "end", text="—", values=("no gaps detected", ""))
+
+    def _draw_bus_plot(self, health=None, fig=None, canvas=None):
+        fig = fig or self.fig_bus
+        canvas = canvas or self.canvas_bus
+        fig.clear()
         c = THEMES[self.theme]; fig.set_facecolor(c["panel"])
         ax = fig.add_subplot(111); self._style_ax(ax)
         health = health or self.bus_health
@@ -891,24 +1094,30 @@ class App:
         if health is None or len(bins) == 0:
             ax.text(0.5, 0.5, "Set a bit rate, then Analyze bus health",
                     ha="center", va="center", color=c["muted"], transform=ax.transAxes)
-            self.canvas_bus.draw(); return
+            canvas.draw(); return
+        origin = health.get("bins_t0", 0.0)
+        for g in health.get("bus_off", []):
+            ax.axvspan(g["start_t"] - origin, g["end_t"] - origin, color=c["warn"], alpha=0.18, lw=0)
         ax.plot(bins, health["load"], color=PALETTE[5], lw=1.1)
         ax.axhline(100, color=c["line"], lw=0.8, linestyle="--")
         ax.set_xlabel("t (s)"); ax.set_ylabel("load (%)")
-        ax.set_title("Bus load over time (estimated)", fontsize=9, loc="left")
-        fig.tight_layout(); self.canvas_bus.draw()
+        ax.set_title("Bus load over time (estimated) — red = BUS-OFF/Power-OFF", fontsize=9, loc="left")
+        fig.tight_layout(); canvas.draw()
 
     def _render_bus_png(self, path, health):
         """Bus-load-over-time chart, embedded on the Bus Health sheet —
         same data as the Bus Health tab's live plot."""
         fig = Figure(figsize=(6.8, 3.0), dpi=110)
         ax = fig.add_subplot(111)
+        origin = health.get("bins_t0", 0.0)
+        for g in health.get("bus_off", []):
+            ax.axvspan(g["start_t"] - origin, g["end_t"] - origin, color="#e8433d", alpha=0.18, lw=0)
         ax.plot(health["bins"], health["load"], color=PALETTE[5], lw=1.2)
         ax.axhline(100, color="#888888", lw=0.8, linestyle="--")
         ax.set_xlabel("t (s)", fontsize=9); ax.set_ylabel("Load (%)", fontsize=9)
         ax.grid(True, alpha=0.3)
-        ax.set_title(f"Bus load over time — estimated at {health['baudrate']/1000:.0f} kbit/s",
-                    fontsize=11, fontweight="bold")
+        ax.set_title(f"Bus load over time — estimated at {health['baudrate']/1000:.0f} kbit/s "
+                    f"(red = BUS-OFF/Power-OFF)", fontsize=11, fontweight="bold")
         fig.tight_layout(); FigureCanvasAgg(fig).print_png(path)
 
     # ── report / export ─────────────────────────────────────────────────────
