@@ -166,7 +166,7 @@
   .dbc-item .rm:hover{color:var(--warn);}
   .field{margin-top:12px;}
   .field label{display:block; font-size:10px; color:var(--faint); margin-bottom:5px; text-transform:uppercase; letter-spacing:.07em; font-weight:700;}
-  .field input[type=text]{width:100%; background:var(--well); border:1px solid var(--line); color:var(--ink); padding:8px 9px; border-radius:3px; font-family:var(--mono); font-size:12px;}
+  .field input[type=text], .field input[type=email]{width:100%; background:var(--well); border:1px solid var(--line); color:var(--ink); padding:8px 9px; border-radius:3px; font-family:var(--mono); font-size:12px;}
   .field textarea{width:100%; background:var(--well); border:1px solid var(--line); color:var(--ink); padding:9px; border-radius:3px; font-family:var(--sans); font-size:12.5px; min-height:100px; resize:vertical;}
   .fieldrow{display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px;}
   @media (max-width:560px){ .fieldrow{grid-template-columns:1fr;} }
@@ -341,7 +341,7 @@
           <input type="file" id="logInput" accept=".log,.txt,.asc,.csv">
         </label>
         <div id="logFormatRow" style="display:none; margin-top:8px;"><span class="format-badge" id="logFormatBadge">—</span></div>
-        <div class="subhead" style="color:var(--muted); font-size:12px; margin:10px 0 0;">Runs best on short traces (~5–10 min). Very long logs (an hour+) parse more slowly and, on dense buses, can briefly freeze the tab while decoding or exporting.</div>
+        <div class="subhead" style="color:var(--muted); font-size:12px; margin:10px 0 0;">There's no fixed time limit — a full day's log is fine as long as the total frame count is reasonable. What matters is how busy the bus was, not how long you logged for: comfortably tested up to a few million frames; the decode stays responsive either way (it yields to the browser as it works) but will take longer and use more memory well beyond that. See the README's "Performance & limits" section for the numbers.</div>
         <div class="fieldrow">
           <div class="field">
             <label>Merge tolerance (s)</label>
@@ -471,6 +471,9 @@
       <div class="stage">
         <div class="stage-head"><span class="stage-idx">07</span><h2>Support</h2></div>
         <div class="subhead" style="color:var(--muted); font-size:12px; margin:-6px 0 12px;">Question, bug, or feature idea? This sends a message straight to Dhanoosh — no email app needed.</div>
+        <div class="field">
+          <input type="email" id="supportEmail" placeholder="Your email — so we can reply with updates">
+        </div>
         <div class="field">
           <textarea id="supportMsg" placeholder="Describe your issue or question…"></textarea>
         </div>
@@ -659,7 +662,31 @@
     consoleEl.scrollTop = consoleEl.scrollHeight;
   }
   function clearLog(){ consoleEl.innerHTML = ''; }
-  function refreshReadyState(){ runBtn.disabled = !(dbcFiles.length && logText); }
+  // a single updating line (by id) rather than appending one per progress
+  // tick, so a long decode doesn't flood the console with hundreds of lines
+  function logProgress(id, msg){
+    let el = document.getElementById(id);
+    if(!el){
+      el = document.createElement('div');
+      el.id = id;
+      el.className = 'l dim';
+      consoleEl.appendChild(el);
+    }
+    el.textContent = msg;
+    consoleEl.scrollTop = consoleEl.scrollHeight;
+  }
+  // Hands control back to the browser for a tick. Every long-running loop
+  // below (log parsing, signal decode, bus-health stats) calls this every
+  // CHUNK iterations instead of running start-to-finish in one go — without
+  // it, a big enough trace (hours of real vehicle traffic can be millions
+  // of lines) blocks the main thread long enough that the browser decides
+  // the page is unresponsive and offers to kill it, or the tab is killed
+  // outright on memory-constrained machines. Yielding periodically keeps
+  // the tab responsive and lets the progress line above actually repaint.
+  const yieldToBrowser = () => new Promise(r=>setTimeout(r,0));
+  const CHUNK = 20000;
+  let decoding = false;
+  function refreshReadyState(){ if(!decoding) runBtn.disabled = !(dbcFiles.length && logText); }
   function thin(points, maxN){
     if(points.length <= maxN) return points;
     const step = Math.ceil(points.length / maxN);
@@ -721,6 +748,13 @@
   dbcInput.addEventListener('change', e=>{ addDbcFiles(e.target.files).then(()=> dbcInput.value = ''); });
   wireDropzone(dbcDrop, files=> addDbcFiles(files));
 
+  // Soft guidance only — not a hard cap. Past this file size, decoding
+  // still works (the parser is chunked so the tab stays responsive), but
+  // it'll take noticeably longer and use more memory, and if you want the
+  // CAN Frames sheet in the Excel export, Excel itself caps a sheet at
+  // 1,048,576 rows regardless of what the browser can hold — see the
+  // README's "Performance & limits" section.
+  const LARGE_FILE_WARN_BYTES = 100 * 1024 * 1024;
   async function setLogFile(file){
     if(!file) return;
     try{
@@ -731,12 +765,18 @@
       refreshReadyState();
     }catch(err){ log(err.message, 'err'); return; }
 
+    if(file.size > LARGE_FILE_WARN_BYTES){
+      log(`Heads up: ${(file.size/1e6).toFixed(0)} MB is a big trace. Decoding stays responsive but `+
+          `will take a while and use significant memory — see the README for what a browser tab can `+
+          `realistically hold, and consider trimming to the time window you actually need.`, 'dim');
+    }
+
     // Pre-parse the log as soon as it's dropped in so Decode can reuse this
     // instead of parsing the same text twice.
     cachedTrace = null;
     logFormatRow.style.display = 'none';
     try{
-      cachedTrace = openTrace(logText);
+      cachedTrace = await openTrace(logText);
       logFormatBadge.textContent = cachedTrace.meta.format;
       logFormatRow.style.display = '';
       if(cachedTrace.fmt === 'busmaster' && baudrateSource !== 'user'){
@@ -835,31 +875,40 @@
     }
     return null;
   }
-  function ingestTraceLog(text){
+  async function ingestTraceLog(text, onProgress){
     const lines = text.split(/\r?\n/); const frames = []; const errors = [];
     let std = 0, ext = 0, malformed = 0;
-    for(const raw of lines){
-      const line = raw.trim();
-      if(!line || line.startsWith('***')) continue;
-      const m = TRACE_LINE_RE.exec(line);
-      if(!m){
-        const tm = TS_RE.exec(line);
-        if(!tm) continue;
-        const [, hh, mm, ss, frac, rest] = tm;
-        if(/error/i.test(rest)){
+    const n = lines.length;
+    for(let li=0; li<n; li++){
+      const line = lines[li].trim();
+      if(line && !line.startsWith('***')){
+        const m = TRACE_LINE_RE.exec(line);
+        if(!m){
+          const tm = TS_RE.exec(line);
+          if(tm){
+            const [, hh, mm, ss, frac, rest] = tm;
+            if(/error/i.test(rest)){
+              const t = parseInt(hh,10)*3600 + parseInt(mm,10)*60 + parseInt(ss,10) + parseInt(frac,10)/10000;
+              errors.push({ t, kind: labelErrorFrame(rest), raw: line.slice(0,120) });
+            } else malformed++;
+          }
+        } else {
+          const [, hh, mm, ss, frac, idHex, type, dlcStr, byteStr] = m;
           const t = parseInt(hh,10)*3600 + parseInt(mm,10)*60 + parseInt(ss,10) + parseInt(frac,10)/10000;
-          errors.push({ t, kind: labelErrorFrame(rest), raw: line.slice(0,120) });
-        } else malformed++;
-        continue;
+          const id = parseInt(idHex,16), dlc = parseInt(dlcStr,10);
+          const bytes = byteStr.trim().length ? byteStr.trim().split(/\s+/).map(b=>parseInt(b,16)) : [];
+          if(bytes.length < dlc){ malformed++; }
+          else {
+            const extended = type === 'x';
+            if(extended) ext++; else std++;
+            frames.push({ t, id, dlc, bytes: bytes.slice(0,dlc), extended });
+          }
+        }
       }
-      const [, hh, mm, ss, frac, idHex, type, dlcStr, byteStr] = m;
-      const t = parseInt(hh,10)*3600 + parseInt(mm,10)*60 + parseInt(ss,10) + parseInt(frac,10)/10000;
-      const id = parseInt(idHex,16), dlc = parseInt(dlcStr,10);
-      const bytes = byteStr.trim().length ? byteStr.trim().split(/\s+/).map(b=>parseInt(b,16)) : [];
-      if(bytes.length < dlc){ malformed++; continue; }
-      const extended = type === 'x';
-      if(extended) ext++; else std++;
-      frames.push({ t, id, dlc, bytes: bytes.slice(0,dlc), extended });
+      if(li % CHUNK === CHUNK - 1){
+        if(onProgress) onProgress(li+1, n);
+        await yieldToBrowser();
+      }
     }
     return { frames, counts:{ std, ext, malformed }, errors };
   }
@@ -875,32 +924,47 @@
     out.push(cur);
     return out;
   }
-  function ingestQuotedCsv(text){
+  async function ingestQuotedCsv(text, onProgress){
     const lines = text.split(/\r?\n/); const frames = []; const errors = [];
     let std = 0, ext = 0, malformed = 0, started = false;
     const timeRe = /^\s*(\d{1,2}):(\d{2}):(\d{2})[.:](\d{1,6})\s*$/;
-    for(const raw of lines){
-      const line = raw.trim();
-      if(!line) continue;
-      if(!started){ if(/^"?\s*Time\s*"?\s*,/i.test(line)) started = true; continue; }
-      const f = splitQuotedRow(line);
-      if(f.length < 5){ malformed++; continue; }
-      const tm = timeRe.exec(f[0]);
-      if(!tm){ malformed++; continue; }
-      const frac = tm[4];
-      const t = (+tm[1])*3600 + (+tm[2])*60 + (+tm[3]) + parseInt(frac,10)/Math.pow(10, frac.length);
-      const rowText = f.join(',');
-      if(/\berr/i.test(rowText)){
-        errors.push({ t, kind: labelErrorFrame(rowText), raw: line.slice(0,120) });
-        continue;
+    const n = lines.length;
+    for(let li=0; li<n; li++){
+      const line = lines[li].trim();
+      if(line){
+        if(!started){
+          if(/^"?\s*Time\s*"?\s*,/i.test(line)) started = true;
+        } else {
+          const f = splitQuotedRow(line);
+          if(f.length < 5){ malformed++; }
+          else {
+            const tm = timeRe.exec(f[0]);
+            if(!tm){ malformed++; }
+            else {
+              const frac = tm[4];
+              const t = (+tm[1])*3600 + (+tm[2])*60 + (+tm[3]) + parseInt(frac,10)/Math.pow(10, frac.length);
+              const rowText = f.join(',');
+              if(/\berr/i.test(rowText)){
+                errors.push({ t, kind: labelErrorFrame(rowText), raw: line.slice(0,120) });
+              } else {
+                const id = parseInt(f[1].trim(), 16);
+                if(!isFinite(id)){ malformed++; }
+                else {
+                  const dataStr = f[4].trim();
+                  const bytes = dataStr.length ? dataStr.split(/\s+/).map(b=>parseInt(b,16)) : [];
+                  const extended = /ext/i.test(f[2]);
+                  if(extended) ext++; else std++;
+                  frames.push({ t, id, dlc: bytes.length, bytes, extended });
+                }
+              }
+            }
+          }
+        }
       }
-      const id = parseInt(f[1].trim(), 16);
-      if(!isFinite(id)){ malformed++; continue; }
-      const dataStr = f[4].trim();
-      const bytes = dataStr.length ? dataStr.split(/\s+/).map(b=>parseInt(b,16)) : [];
-      const extended = /ext/i.test(f[2]);
-      if(extended) ext++; else std++;
-      frames.push({ t, id, dlc: bytes.length, bytes, extended });
+      if(li % CHUNK === CHUNK - 1){
+        if(onProgress) onProgress(li+1, n);
+        await yieldToBrowser();
+      }
     }
     return { frames, counts:{ std, ext, malformed }, errors };
   }
@@ -913,54 +977,66 @@
   // line isn't used to separate multiple channels mixed into one capture
   // (e.g. `candump -l any`), so a gap on one interface can be masked by
   // traffic on another if they were captured together.
-  function ingestCandump(text){
+  async function ingestCandump(text, onProgress){
     const lines = text.split(/\r?\n/); const frames = []; const errors = [];
     let std = 0, ext = 0, malformed = 0;
     let sawAny = false, sawRealTs = false, seq = 0;
-    for(const raw of lines){
-      const line = raw.trim();
-      if(!line) continue;
-      let m = CANDUMP_LOG_RE.exec(line);
-      if(m){
-        sawAny = true;
-        const [, tsStr, iface, idHex, sep, payload] = m;
-        const t = parseFloat(tsStr);
-        sawRealTs = true;
-        const extended = idHex.length > 3;
-        const id = parseInt(idHex, 16);
-        let dlc, bytes;
-        if(sep === '#' && /^[Rr]/.test(payload)){
-          const n = payload.slice(1);
-          dlc = /^\d+$/.test(n) ? parseInt(n,10) : 0;
-          bytes = [];
+    const n = lines.length;
+    for(let li=0; li<n; li++){
+      const line = lines[li].trim();
+      if(line){
+        let m = CANDUMP_LOG_RE.exec(line);
+        if(m){
+          sawAny = true;
+          const [, tsStr, iface, idHex, sep, payload] = m;
+          const t = parseFloat(tsStr);
+          sawRealTs = true;
+          const extended = idHex.length > 3;
+          const id = parseInt(idHex, 16);
+          let dlc, bytes, bad = false;
+          if(sep === '#' && /^[Rr]/.test(payload)){
+            const rn = payload.slice(1);
+            dlc = /^\d+$/.test(rn) ? parseInt(rn,10) : 0;
+            bytes = [];
+          } else {
+            const hexdata = sep === '##' ? payload.slice(1) : payload;   // ## carries a flags nibble first
+            if(hexdata.length % 2 !== 0){ malformed++; bad = true; bytes = []; dlc = 0; }
+            else {
+              bytes = [];
+              for(let i=0;i<hexdata.length;i+=2) bytes.push(parseInt(hexdata.substr(i,2),16));
+              dlc = bytes.length;
+            }
+          }
+          if(!bad){
+            if(extended) ext++; else std++;
+            frames.push({ t, id, dlc, bytes, extended, iface });
+          }
         } else {
-          const hexdata = sep === '##' ? payload.slice(1) : payload;   // ## carries a flags nibble first
-          if(hexdata.length % 2 !== 0){ malformed++; continue; }
-          bytes = [];
-          for(let i=0;i<hexdata.length;i+=2) bytes.push(parseInt(hexdata.substr(i,2),16));
-          dlc = bytes.length;
+          m = CANDUMP_LIVE_RE.exec(line);
+          if(m){
+            sawAny = true;
+            const [, tsStr, iface, idHex, dlcStr, byteStr] = m;
+            let t;
+            if(tsStr !== undefined){ t = parseFloat(tsStr); sawRealTs = true; }
+            else { t = seq; seq += 0.001; }   // no timestamp column — keep frame order only
+            const extended = idHex.length > 3;
+            const id = parseInt(idHex, 16);
+            const dlc = parseInt(dlcStr, 10);
+            const bytes = byteStr.trim().length ? byteStr.trim().split(/\s+/).map(b=>parseInt(b,16)) : [];
+            if(bytes.length < dlc){ malformed++; }
+            else {
+              if(extended) ext++; else std++;
+              frames.push({ t, id, dlc, bytes: bytes.slice(0,dlc), extended, iface });
+            }
+          } else {
+            malformed++;
+          }
         }
-        if(extended) ext++; else std++;
-        frames.push({ t, id, dlc, bytes, extended, iface });
-        continue;
       }
-      m = CANDUMP_LIVE_RE.exec(line);
-      if(m){
-        sawAny = true;
-        const [, tsStr, iface, idHex, dlcStr, byteStr] = m;
-        let t;
-        if(tsStr !== undefined){ t = parseFloat(tsStr); sawRealTs = true; }
-        else { t = seq; seq += 0.001; }   // no timestamp column — keep frame order only
-        const extended = idHex.length > 3;
-        const id = parseInt(idHex, 16);
-        const dlc = parseInt(dlcStr, 10);
-        const bytes = byteStr.trim().length ? byteStr.trim().split(/\s+/).map(b=>parseInt(b,16)) : [];
-        if(bytes.length < dlc){ malformed++; continue; }
-        if(extended) ext++; else std++;
-        frames.push({ t, id, dlc, bytes: bytes.slice(0,dlc), extended, iface });
-        continue;
+      if(li % CHUNK === CHUNK - 1){
+        if(onProgress) onProgress(li+1, n);
+        await yieldToBrowser();
       }
-      malformed++;
     }
     return { frames, counts:{ std, ext, malformed }, errors, syntheticTime: sawAny && !sawRealTs };
   }
@@ -991,9 +1067,10 @@
     return `${String(d).padStart(2,'0')} ${mon} ${year}`;
   }
   const FORMAT_LABELS = { csv:'Quoted CSV trace', candump:'candump (SocketCAN)', busmaster:'BUSMASTER' };
-  function openTrace(text){
+  async function openTrace(text, onProgress){
     const fmt = sniffTraceFormat(text);
-    const parsed = fmt === 'csv' ? ingestQuotedCsv(text) : fmt === 'candump' ? ingestCandump(text) : ingestTraceLog(text);
+    const parsed = await (fmt === 'csv' ? ingestQuotedCsv(text, onProgress)
+      : fmt === 'candump' ? ingestCandump(text, onProgress) : ingestTraceLog(text, onProgress));
     const frames = parsed.frames;
     const meta = { format: FORMAT_LABELS[fmt] || 'BUSMASTER', date:'—', start:'—', end:'—', duration:'—', durSec:0, frames:frames.length };
     if(fmt === 'csv'){
@@ -1050,22 +1127,29 @@
     if(sig.signed && (raw & (1n << BigInt(len - 1)))) raw -= (1n << BigInt(len));
     return Number(raw) * sig.scale + sig.offset;
   }
-  function buildSignalSeries(frames, messages){
+  async function buildSignalSeries(frames, messages, onProgress){
     const frameIds = new Set(frames.map(f=>f.id));
     const matchedMsgs = messages.filter(m=>frameIds.has(m.id));
     const buckets = new Map();
     frames.forEach((f,i)=>{ if(!buckets.has(f.id)) buckets.set(f.id,[]); buckets.get(f.id).push(f); });
     const series = [];
+    let done = 0;
+    const total = matchedMsgs.reduce((a,m)=> a + m.signals.length, 0) || 1;
     for(const msg of matchedMsgs){
       const fr = (buckets.get(msg.id) || []).slice().sort((a,b)=>a.t-b.t);
-      if(!fr.length) continue;
-      for(const sig of msg.signals){
-        const points = [];
-        for(const f of fr){
-          const v = extractSignalValue(f.bytes, sig);
-          if(v !== null) points.push({ t:f.t, v });
+      if(fr.length){
+        for(const sig of msg.signals){
+          const points = [];
+          for(let i=0;i<fr.length;i++){
+            const v = extractSignalValue(fr[i].bytes, sig);
+            if(v !== null) points.push({ t:fr[i].t, v });
+            if(i % CHUNK === CHUNK - 1) await yieldToBrowser();
+          }
+          if(points.length) series.push({ name:sig.name, unit:sig.unit, msgId:msg.id, points });
+          done++;
+          if(onProgress) onProgress(done, total);
+          await yieldToBrowser();
         }
-        if(points.length) series.push({ name:sig.name, unit:sig.unit, msgId:msg.id, points });
       }
     }
     return { series, matchedMsgs };
@@ -1131,7 +1215,7 @@
     }
     return events;
   }
-  function evaluateBusHealth(frames, durSec, baudrate, stuffFactor, gapThresholdSec){
+  async function evaluateBusHealth(frames, durSec, baudrate, stuffFactor, gapThresholdSec){
     if(!frames.length || durSec <= 0) return { perId:[], bins:[], load:[], loadAvg:0, loadPeak:0, busOff:[], binsT0:0 };
     let t0 = frames[0].t;
     for(const f of frames) if(f.t < t0) t0 = f.t;
@@ -1139,20 +1223,33 @@
     // gap detection doesn't need a bit rate, so compute it before any
     // baudrate-conditional early return below
     const busOff = detectBusOffGaps(frames, gapThresholdSec);
+    await yieldToBrowser();
+
+    // a gap counts toward an ID's own "dropout" flag only if it ISN'T just
+    // that ID going quiet because the whole bus went quiet (a BUS-OFF /
+    // Power-OFF event, already flagged separately above) — otherwise a
+    // single bus-wide outage would mark every ID that was active around it
+    // as individually "dropped out", which isn't what dropout means
+    const overlapsBusOff = (gStart, gEnd) => busOff.some(g => gStart < g.endT && gEnd > g.startT);
 
     const byId = new Map();
     for(const f of frames){ if(!byId.has(f.id)) byId.set(f.id, []); byId.get(f.id).push(f.t); }
     const perId = [];
-    byId.forEach((times, cid)=>{
-      times = times.slice().sort((a,b)=>a-b);
+    for(const [cid, rawTimes] of byId){
+      const times = rawTimes.slice().sort((a,b)=>a-b);
       const n = times.length;
       const gaps = [];
-      for(let i=1;i<n;i++) gaps.push((times[i]-times[i-1]) * 1000);
+      let maxOwnGapMs = 0;
+      for(let i=1;i<n;i++){
+        const gapMs = (times[i]-times[i-1]) * 1000;
+        gaps.push(gapMs);
+        if(!overlapsBusOff(times[i-1], times[i]) && gapMs > maxOwnGapMs) maxOwnGapMs = gapMs;
+      }
       let dropout = false;
       if(gaps.length >= 4){
         const sorted = gaps.slice().sort((a,b)=>a-b);
         const med = sorted[Math.floor(sorted.length/2)];
-        if(med > 0 && arrMax(gaps) > 3 * med) dropout = true;
+        if(med > 0 && maxOwnGapMs > 3 * med) dropout = true;
       }
       const mean = gaps.length ? gaps.reduce((a,b)=>a+b,0)/gaps.length : 0;
       const variance = gaps.length ? gaps.reduce((a,b)=>a+(b-mean)*(b-mean),0)/gaps.length : 0;
@@ -1161,7 +1258,8 @@
         avgGapMs: mean, stdGapMs: Math.sqrt(variance),
         maxGapMs: gaps.length ? arrMax(gaps) : 0, dropout,
       });
-    });
+      await yieldToBrowser();   // one CAN ID's worth of frames can itself be millions
+    }
     perId.sort((a,b)=> b.count - a.count);
 
     // per-ID timing above is exact and doesn't need a bit rate — load % does,
@@ -1171,12 +1269,14 @@
     const windowSec = 1.0;
     const nBins = Math.max(1, Math.ceil(durSec / windowSec));
     const binBits = new Array(nBins).fill(0);
-    for(const f of frames){
+    for(let i=0;i<frames.length;i++){
+      const f = frames[i];
       const base = f.extended ? 67 : 47;
       const bits = (base + 8*f.dlc) * stuffFactor;
       let idx = Math.floor((f.t - t0) / windowSec);
       if(idx < 0) idx = 0; if(idx > nBins-1) idx = nBins-1;
       binBits[idx] += bits;
+      if(i % CHUNK === CHUNK - 1) await yieldToBrowser();
     }
     // The last bin usually covers less than a full windowSec of real time
     // (durSec rarely divides evenly) — dividing it by a full window's
@@ -1202,8 +1302,12 @@
   function buildBusLoadChartConfig(health, tc){
     const loadCaption = health.load.length
       ? `min ${arrMin(health.load).toFixed(2)}%   max ${health.loadPeak.toFixed(2)}%   avg ${health.loadAvg.toFixed(2)}%` : '';
+    // one bin per second means a 24h trace is 86,400 points — thin it for
+    // rendering the same way per-signal charts already are, or Chart.js
+    // ends up laying out and drawing far more points than a screen can show
+    const thinnedBins = thin(health.bins.map((t,i)=>({t, v: health.load[i]})), 4000);
     return { type:'line',
-      data:{ datasets:[{ data: health.bins.map((t,i)=>({x:t,y:health.load[i]})), borderColor:'#d9483b', backgroundColor:'#d9483b1f', fill:true, pointRadius:0, borderWidth:1.4, tension:0.15 }] },
+      data:{ datasets:[{ data: thinnedBins.map(p=>({x:p.t,y:p.v})), borderColor:'#d9483b', backgroundColor:'#d9483b1f', fill:true, pointRadius:0, borderWidth:1.4, tension:0.15 }] },
       options:{ responsive:true, maintainAspectRatio:false, animation:false, parsing:false,
         plugins:{ legend:{ display:false },
           annotation:{ annotations: gapAnnotations(health.busOff, health.binsT0, tc.warn+'2e') },
@@ -1376,8 +1480,11 @@
   });
 
   // ── stats table + charts (only for CHECKED signals) ─────
-  function buildSignalChartConfig(s, pts, colorHex, tc, fullPts){
-    const st = summarizeSeries(fullPts || pts);
+  function buildSignalChartConfig(s, pts, colorHex, tc, fullPts, precomputedSt){
+    // accept an already-computed summary when the caller has one (paintSelection
+    // does, for the chart-card widget) rather than re-scanning a potentially
+    // multi-million-point array a second time for the same signal
+    const st = precomputedSt || summarizeSeries(fullPts || pts);
     return { type:'line',
       data:{ datasets:[{ data: pts.map(p=>({x:+(p.t-logT0).toFixed(4), y:p.v})), borderColor:colorHex, backgroundColor:colorHex+'22', fill:true, pointRadius:0, borderWidth:1.4, tension:0.1 }] },
       options:{ responsive:true, maintainAspectRatio:false, animation:false, parsing:false,
@@ -1387,7 +1494,7 @@
                   y:{ grid:{color:tc.grid}, ticks:{color:tc.tick, font:{size:9}} } } },
       plugins:[statsCaptionPlugin] };
   }
-  function paintSelection(matched){
+  async function paintSelection(matched){
     const sel = activeSignals(matched);
     if(sel.length === 0){
       statsWrap.innerHTML = '<div class="empty">No signals ticked.</div>';
@@ -1398,24 +1505,29 @@
     const tbl = document.createElement('table');
     tbl.innerHTML = `<thead><tr><th>Signal</th><th>Unit</th><th>N</th><th>Min</th><th>Max</th><th>Mean</th><th>Std</th></tr></thead>`;
     const tbody = document.createElement('tbody');
-    sel.forEach(s=>{
+    for(let si=0; si<sel.length; si++){
+      const s = sel[si];
       const pts = windowPoints(s.points);
-      if(!pts.length) return;
-      const st = summarizeSeries(pts);
-      const tr = document.createElement('tr');
-      tr.innerHTML = `<td>${escHtml(s.name)}</td><td>${escHtml(s.unit||'—')}</td><td>${st.n}</td>
-        <td>${st.min.toFixed(4)}</td><td>${st.max.toFixed(4)}</td><td>${st.mean.toFixed(4)}</td><td>${st.std.toFixed(4)}</td>`;
-      tbody.appendChild(tr);
-    });
+      if(pts.length){
+        const st = summarizeSeries(pts);
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${escHtml(s.name)}</td><td>${escHtml(s.unit||'—')}</td><td>${st.n}</td>
+          <td>${st.min.toFixed(4)}</td><td>${st.max.toFixed(4)}</td><td>${st.mean.toFixed(4)}</td><td>${st.std.toFixed(4)}</td>`;
+        tbody.appendChild(tr);
+      }
+      if(si % 2 === 1) await yieldToBrowser();
+    }
     tbl.appendChild(tbody);
     statsWrap.innerHTML = ''; statsWrap.appendChild(tbl);
 
     charts.forEach(c=>c.destroy()); charts = [];
     chartsWrap.innerHTML = '';
     const tc = themeColors();
-    sel.slice(0, 24).forEach((s, i)=>{
+    const chartSel = sel.slice(0, 24);
+    for(let i=0; i<chartSel.length; i++){
+      const s = chartSel[i];
       const fullPts = windowPoints(s.points);
-      if(!fullPts.length) return;
+      if(!fullPts.length) continue;
       const pts = thin(fullPts, 2000);
       const col = palette[i % palette.length];
       const liveVal = fullPts[fullPts.length - 1].v;
@@ -1436,7 +1548,7 @@
         <canvas></canvas>`;
       chartsWrap.appendChild(card);
       const ctx = card.querySelector('canvas');
-      const chart = new Chart(ctx, buildSignalChartConfig(s, pts, col, tc, fullPts));
+      const chart = new Chart(ctx, buildSignalChartConfig(s, pts, col, tc, fullPts, st));
       chart.$meta = { title: s.name + (s.unit ? '  ['+s.unit+']' : ''), build: ()=> buildSignalChartConfig(s, thin(windowPoints(s.points), 4000), col, themeColors(), windowPoints(s.points)) };
       charts.push(chart);
 
@@ -1454,7 +1566,12 @@
         numEl.textContent = fmtLive(liveVal);
         capEl.textContent = `${u} · last in window`;
       });
-    });
+      // yield after every signal, not just every few — windowPoints() and
+      // summarizeSeries() above are full O(n) scans, and for a signal
+      // sampled over a genuinely long trace (a full day at even a modest
+      // rate is millions of points) that's real synchronous work per card
+      await yieldToBrowser();
+    }
   }
   chartsWrap.addEventListener('click', e=>{
     const card = e.target.closest('.chartcard');
@@ -1513,7 +1630,7 @@
         plugins:{ legend:{ display:true, labels:{ color:tc.tick, font:{size:9}, boxWidth:12 } }, zoom: zoomPluginOptions() },
         scales } };
   }
-  function drawOverlay(){
+  async function drawOverlay(){
     overlayChart && overlayChart.destroy(); overlayChart = null;
     const chosen = currentOverlaySignals();
     if(chosen.length < 2){
@@ -1524,11 +1641,16 @@
     }
     overlayBlock.style.display = ''; overlayHint.style.display = ''; overlayEmpty.style.display = 'none';
     overlayChart = new Chart(overlayCanvas, buildOverlayChartConfig(chosen, ovNormalize.checked, themeColors()));
-    $('overlayStats').innerHTML = chosen.map((s, i)=>{
+    await yieldToBrowser();
+    const parts = [];
+    for(let i=0; i<chosen.length; i++){
+      const s = chosen[i];
       const st = summarizeSeries(windowPoints(s.points));
       const u = s.unit ? ' '+escHtml(s.unit) : '';
-      return `<span style="color:${palette[i % palette.length]}"><b>${escHtml(s.name)}</b> min ${st.min.toFixed(3)}${u} · max ${st.max.toFixed(3)}${u} · avg ${st.mean.toFixed(3)}${u}</span>`;
-    }).join('');
+      parts.push(`<span style="color:${palette[i % palette.length]}"><b>${escHtml(s.name)}</b> min ${st.min.toFixed(3)}${u} · max ${st.max.toFixed(3)}${u} · avg ${st.mean.toFixed(3)}${u}</span>`);
+      await yieldToBrowser();
+    }
+    $('overlayStats').innerHTML = parts.join('');
   }
   ovPlotBtn.addEventListener('click', drawOverlay);
   ovNormalize.addEventListener('change', drawOverlay);
@@ -1584,14 +1706,14 @@
       if(health && health.bins.length) openChartModal('Bus load over time (estimated)', buildBusLoadChartConfig(health, themeColors()));
     }
   });
-  function paintBusHealth(){
+  async function paintBusHealth(){
     const durSec = (trimEnd == null ? logDur : trimEnd) - (trimStart == null ? 0 : trimStart);
     const baudrate = parseFloat(baudrateInp.value) || 0;
     let gapThreshold = parseFloat(gapThresholdInp.value);
     if(!(gapThreshold > 0)) gapThreshold = GAP_THRESHOLD_DEFAULT;
     const fr = windowFrames(allFrames);
     const errs = windowErrors(allErrors);
-    const health = evaluateBusHealth(fr, durSec, baudrate, STUFF_FACTOR, gapThreshold);
+    const health = await evaluateBusHealth(fr, durSec, baudrate, STUFF_FACTOR, gapThreshold);
     window.__lastHealth = health; window.__lastErrors = errs; window.__lastBaudrate = baudrate;
     window.__lastGapThreshold = gapThreshold;
 
@@ -1743,86 +1865,109 @@
   });
   showStage('01');
   // ── run (decode) ─────────────────────────────────────────
-  runBtn.addEventListener('click', ()=>{
-    clearLog();
-    showStage('02');
-    trimStart = null; trimEnd = null;
-    trimBar.style.display = 'none';
+  runBtn.addEventListener('click', async ()=>{
+    if(decoding) return;
+    decoding = true; runBtn.disabled = true;
+    try{
+      clearLog();
+      showStage('02');
+      trimStart = null; trimEnd = null;
+      trimBar.style.display = 'none';
 
-    log(`Parsing ${dbcFiles.length} DBC database(s)…`);
-    messages = [];
-    const seenIds = new Set(); let dupCount = 0;
-    for(const f of dbcFiles){
-      const msgs = loadMessageDefinitions(f.text);
-      let added = 0;
-      for(const m of msgs){
-        if(seenIds.has(m.id)){ dupCount++; continue; }
-        seenIds.add(m.id); messages.push(m); added++;
+      log(`Parsing ${dbcFiles.length} DBC database(s)…`);
+      messages = [];
+      const seenIds = new Set(); let dupCount = 0;
+      for(const f of dbcFiles){
+        const msgs = loadMessageDefinitions(f.text);
+        let added = 0;
+        for(const m of msgs){
+          if(seenIds.has(m.id)){ dupCount++; continue; }
+          seenIds.add(m.id); messages.push(m); added++;
+        }
+        log(`  ${f.name} — ${msgs.length} message(s), ${added} new`, 'dim');
       }
-      log(`  ${f.name} — ${msgs.length} message(s), ${added} new`, 'dim');
-    }
-    if(dupCount) log(`${dupCount} duplicate message ID(s) across databases — kept first definition.`, 'dim');
+      if(dupCount) log(`${dupCount} duplicate message ID(s) across databases — kept first definition.`, 'dim');
 
-    const declared = declaredBusSpeed(dbcFiles);
-    dbcBaudrate = declared.baudrate; dbcBaudrateConflict = declared.conflicting;
-    if(dbcBaudrate){
-      const note = dbcBaudrateConflict ? 'conflicting values across DBCs, using first' : 'BS_:';
-      log(`DBC declares bus speed: ${(dbcBaudrate/1000).toFixed(0)} kbit/s (${note})`, 'dim');
-      if(baudrateSource !== 'user' && baudrateSource !== 'log'){
-        baudrateInp.value = String(dbcBaudrate); baudrateSource = 'dbc';
+      const declared = declaredBusSpeed(dbcFiles);
+      dbcBaudrate = declared.baudrate; dbcBaudrateConflict = declared.conflicting;
+      if(dbcBaudrate){
+        const note = dbcBaudrateConflict ? 'conflicting values across DBCs, using first' : 'BS_:';
+        log(`DBC declares bus speed: ${(dbcBaudrate/1000).toFixed(0)} kbit/s (${note})`, 'dim');
+        if(baudrateSource !== 'user' && baudrateSource !== 'log'){
+          baudrateInp.value = String(dbcBaudrate); baudrateSource = 'dbc';
+        }
       }
-    }
 
-    log('Loading log…');
-    let parsed;
-    try{ parsed = cachedTrace || openTrace(logText); }
-    catch(err){ log('Log parse failed: '+err.message, 'err'); return; }
-    allFrames = parsed.frames;
-    allErrors = parsed.errors;
-    logMeta = parsed.meta;
-    frameNameById = {};
-    messages.forEach(m=> frameNameById[m.id] = m.name);
-    if(!allFrames.length){ log('No frames parsed from the log.', 'err'); return; }
-    log(`Detected ${parsed.meta.format} — ${allFrames.length} frame(s) (${parsed.counts.std} std, ${parsed.counts.ext} ext, ${parsed.counts.malformed} skipped, ${allErrors.length} error frame(s)).`, 'info');
-    if(logMeta.note) log(logMeta.note, 'dim');
-    logFormatBadge.textContent = parsed.meta.format;
-    logFormatRow.style.display = '';
-
-    const { series, matchedMsgs } = buildSignalSeries(allFrames, messages);
-    log(`Decoded ${series.length} signal(s) from ${matchedMsgs.length} message ID(s).`, 'info');
-
-    let first = allFrames[0].t, last = allFrames[0].t;
-    for(const f of allFrames){ if(f.t<first) first=f.t; if(f.t>last) last=f.t; }
-    logT0 = first; logDur = last - first;
-
-    roDate.textContent = logMeta.date; roStart.textContent = logMeta.start;
-    roEnd.textContent = logMeta.end; roDur.textContent = logMeta.duration.split(' · ')[0];
-    roFrames.textContent = allFrames.length; roSignals.textContent = series.length;
-
-    if(logDur > 0){ trimBar.style.display = ''; updateTrimInfo(); }
-
-    paintSignalChecklist(series);
-    paintSelection(series);
-    populateOverlaySelects(series);
-    drawOverlay();
-    if(!parseFloat(baudrateInp.value)){
-      const ans = window.prompt("Bus bit rate wasn't found in the log header or a DBC.\n"+
-        'Enter it in bit/s (e.g. 500000, 250000, 125000) — Cancel to skip bus load %:', '');
-      const v = ans == null ? NaN : parseFloat(ans);
-      if(v > 0){
-        baudrateInp.value = String(v); baudrateSource = 'user';
-        log(`Bus bit rate set manually: ${(v/1000).toFixed(0)} kbit/s.`, 'dim');
-      } else {
-        log('No bus bit rate given — bus load % will show as unavailable until you enter one.', 'dim');
+      log('Loading log…');
+      let parsed;
+      try{
+        parsed = cachedTrace || await openTrace(logText, (done,total)=>
+          logProgress('parseProg', `  parsing… ${Math.round(done/total*100)}% (${done.toLocaleString()} / ${total.toLocaleString()} lines)`));
       }
+      catch(err){
+        log('Log parse failed: '+err.message, 'err');
+        log('Supported formats: BUSMASTER .log, MiniMon-compatible quoted CSV, and candump/SocketCAN log. '+
+          'Need another format supported? Email dhanoosh2001@gmail.com with your email ID so we can update you.', 'err');
+        return;
+      }
+      allFrames = parsed.frames;
+      allErrors = parsed.errors;
+      logMeta = parsed.meta;
+      frameNameById = {};
+      messages.forEach(m=> frameNameById[m.id] = m.name);
+      if(!allFrames.length){
+        log('No frames parsed — this file doesn\'t look like a supported trace format.', 'err');
+        log('Supported formats: BUSMASTER .log, MiniMon-compatible quoted CSV, and candump/SocketCAN log.', 'err');
+        log('Need another format supported? Email dhanoosh2001@gmail.com with your email ID so we can update you.', 'err');
+        return;
+      }
+      log(`Detected ${parsed.meta.format} — ${allFrames.length} frame(s) (${parsed.counts.std} std, ${parsed.counts.ext} ext, ${parsed.counts.malformed} skipped, ${allErrors.length} error frame(s)).`, 'info');
+      if(logMeta.note) log(logMeta.note, 'dim');
+      logFormatBadge.textContent = parsed.meta.format;
+      logFormatRow.style.display = '';
+
+      log('Decoding signals…');
+      const { series, matchedMsgs } = await buildSignalSeries(allFrames, messages, (done,total)=>
+        logProgress('decodeProg', `  decoding… ${Math.round(done/total*100)}% (${done} / ${total} signals)`));
+      log(`Decoded ${series.length} signal(s) from ${matchedMsgs.length} message ID(s).`, 'info');
+
+      let first = allFrames[0].t, last = allFrames[0].t;
+      for(const f of allFrames){ if(f.t<first) first=f.t; if(f.t>last) last=f.t; }
+      logT0 = first; logDur = last - first;
+
+      roDate.textContent = logMeta.date; roStart.textContent = logMeta.start;
+      roEnd.textContent = logMeta.end; roDur.textContent = logMeta.duration.split(' · ')[0];
+      roFrames.textContent = allFrames.length; roSignals.textContent = series.length;
+
+      if(logDur > 0){ trimBar.style.display = ''; updateTrimInfo(); }
+
+      paintSignalChecklist(series);
+      await paintSelection(series);
+      populateOverlaySelects(series);
+      await drawOverlay();
+      if(!parseFloat(baudrateInp.value)){
+        const ans = window.prompt("Bus bit rate wasn't found in the log header or a DBC.\n"+
+          'Enter it in bit/s (e.g. 500000, 250000, 125000) — Cancel to skip bus load %:', '');
+        const v = ans == null ? NaN : parseFloat(ans);
+        if(v > 0){
+          baudrateInp.value = String(v); baudrateSource = 'user';
+          log(`Bus bit rate set manually: ${(v/1000).toFixed(0)} kbit/s.`, 'dim');
+        } else {
+          log('No bus bit rate given — bus load % will show as unavailable until you enter one.', 'dim');
+        }
+      }
+      log('Analyzing bus health…');
+      await paintBusHealth();
+      if(window.__lastHealth && window.__lastHealth.busOff.length){
+        log(`BUS-OFF/Power-OFF: ${window.__lastHealth.busOff.length} gap(s) > ${window.__lastGapThreshold.toFixed(1)}s — see the Bus Health stage.`, 'info');
+      }
+      downloadBtn.disabled = series.length === 0;
+      log('Done. See Signals Decoded / Stats / Bus Health / Charts in the sidebar.', 'info');
+      showStage('03');
+    } finally {
+      decoding = false;
+      refreshReadyState();
     }
-    paintBusHealth();
-    if(window.__lastHealth && window.__lastHealth.busOff.length){
-      log(`BUS-OFF/Power-OFF: ${window.__lastHealth.busOff.length} gap(s) > ${window.__lastGapThreshold.toFixed(1)}s — see the Bus Health stage.`, 'info');
-    }
-    downloadBtn.disabled = series.length === 0;
-    log('Done. See Signals Decoded / Stats / Bus Health / Charts in the sidebar.', 'info');
-    showStage('03');
   });
   // ── export .xlsx ─────────────────────────────────────────
   function uniqueSheetName(name, used){
@@ -1873,6 +2018,27 @@
     const chartV = activeSignals(currentMatched).map(s=>({ name:s.name, unit:s.unit, msgId:s.msgId, points: windowPoints(s.points) })).filter(s=>s.points.length);
     const framesV = windowFrames(allFrames);
     if(!allV.length){ log('Nothing to export.', 'err'); return; }
+    const filename = (logFileName || 'can_log') + '_decoded.xlsx';
+
+    // Ask where to save it up front, while the click's user-activation is
+    // still fresh — without this, the browser just drops the file in its
+    // default Downloads folder with no prompt and no obvious confirmation
+    // of where it went. Not every browser supports this (Firefox/Safari
+    // don't yet), so fall back to the plain download below when it's missing.
+    let fileHandle = null;
+    if(window.showSaveFilePicker){
+      try{
+        fileHandle = await window.showSaveFilePicker({
+          suggestedName: filename,
+          types: [{ description: 'Excel workbook',
+                    accept: { 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'] } }]
+        });
+      }catch(err){
+        if(err && err.name === 'AbortError'){ log('Export cancelled.', 'dim'); return; }
+        fileHandle = null;   // picker unavailable/failed for some other reason — fall back
+      }
+    }
+
     const prevLabel = downloadBtn.textContent;
     downloadBtn.disabled = true;
     try{
@@ -1880,7 +2046,7 @@
       const tol = parseFloat(tolInput.value) || 0.1;
       const baudrate = window.__lastBaudrate || parseFloat(baudrateInp.value) || 0;
       const gapThreshold = window.__lastGapThreshold || parseFloat(gapThresholdInp.value) || GAP_THRESHOLD_DEFAULT;
-      const health = window.__lastHealth || evaluateBusHealth(framesV, logDur, baudrate, STUFF_FACTOR, gapThreshold);
+      const health = window.__lastHealth || await evaluateBusHealth(framesV, logDur, baudrate, STUFF_FACTOR, gapThreshold);
       const errs = window.__lastErrors || windowErrors(allErrors);
       const busOff = health.busOff || [];
       const wb = new ExcelJS.Workbook();
@@ -1996,14 +2162,16 @@
         summarySheet.addRow([s.name, s.unit||'', st.n, +st.min.toFixed(4), +st.max.toFixed(4), +st.mean.toFixed(4), +st.std.toFixed(4)]);
       });
 
-      // CAN Frames (raw trace)
+      // CAN Frames (raw trace) — Excel hard-caps a sheet at 1,048,576 rows
+      // (including the header), so a trace with more frames than that would
+      // silently lose data — or produce an invalid file — if written to one
+      // sheet. Instead, spill into "CAN Frames 2", "CAN Frames 3", ... so
+      // every frame still ends up in the workbook somewhere.
       setProg('Frames…');
       await new Promise(r=>setTimeout(r,0));
-      const framesSheet = wb.addWorksheet(uniqueSheetName('CAN Frames', usedNames));
-      framesSheet.addRow(['Time_s','Clock','CAN_ID','Type','Message','DLC','Data (hex)','B0','B1','B2','B3','B4','B5','B6','B7']);
-      framesSheet.getRow(1).font = { bold:true };
-      framesSheet.columns.forEach((c,i)=>{ c.width = i===6 ? 26 : (i<6 ? 11 : 5); });
       const FRAME_BUILD_CHUNK = 20000;
+      const FRAMES_PER_SHEET = 1000000;   // headroom under Excel's 1,048,576 row cap
+      const FRAME_HEADER = ['Time_s','Clock','CAN_ID','Type','Message','DLC','Data (hex)','B0','B1','B2','B3','B4','B5','B6','B7'];
       const frameRows = new Array(framesV.length);
       for(let i=0;i<framesV.length;i++){
         const f = framesV[i];
@@ -2017,46 +2185,88 @@
           await new Promise(r=>setTimeout(r,0));
         }
       }
-      await appendRowsInChunks(framesSheet, frameRows, 5000, (done,total)=> setProg(`Frames ${Math.round(done/total*100)}%`));
+      const frameSheetCount = Math.max(1, Math.ceil(frameRows.length / FRAMES_PER_SHEET));
+      for(let sheetIdx=0; sheetIdx<frameSheetCount; sheetIdx++){
+        const framesSheet = wb.addWorksheet(uniqueSheetName('CAN Frames', usedNames));
+        framesSheet.addRow(FRAME_HEADER);
+        framesSheet.getRow(1).font = { bold:true };
+        framesSheet.columns.forEach((c,i)=>{ c.width = i===6 ? 26 : (i<6 ? 11 : 5); });
+        const part = frameRows.slice(sheetIdx*FRAMES_PER_SHEET, (sheetIdx+1)*FRAMES_PER_SHEET);
+        await appendRowsInChunks(framesSheet, part, 5000, (done,total)=>
+          setProg(`Frames sheet ${sheetIdx+1}/${frameSheetCount}: ${Math.round(done/total*100)}%`));
+      }
+      if(frameSheetCount > 1){
+        log(`CAN Frames split across ${frameSheetCount} sheets (${frameRows.length.toLocaleString()} frames, `+
+            `${FRAMES_PER_SHEET.toLocaleString()} per sheet — Excel's own limit is 1,048,576 rows/sheet).`, 'dim');
+      }
 
-      // Merged — every decoded signal, one column each
+      // Merged — every decoded signal, one column each. Rather than skip
+      // the whole sheet when it's too big, split it: by signal (column)
+      // groups to stay under a sane per-sheet cell budget, and by time (row)
+      // groups too if the trace has more unique timestamps than Excel
+      // allows on one sheet (1,048,576 rows) — so nothing is ever dropped,
+      // it just spills onto more sheets.
       setProg('Merging…');
       await new Promise(r=>setTimeout(r,0));
-      const dataSheet = wb.addWorksheet(uniqueSheetName('Merged', usedNames));
-      const MERGE_CELL_LIMIT = 1500000;
+      const MERGE_CELL_BUDGET = 1500000;
+      const MERGE_ROW_CAP = 1000000;   // headroom under Excel's 1,048,576 row limit
       const allTimes = new Set();
-      let overLimit = false;
-      for(let si=0; si<allV.length && !overLimit; si++){
+      for(let si=0; si<allV.length; si++){
         const pts = allV[si].points;
         for(let pi=0; pi<pts.length; pi++){
           allTimes.add(+(pts[pi].t-t0).toFixed(4));
-          if(allTimes.size * allV.length > MERGE_CELL_LIMIT){ overLimit = true; break; }
           if(pi % 200000 === 199999) await new Promise(r=>setTimeout(r,0));
         }
         setProg(`Merging (scanning) ${si+1}/${allV.length}`);
         await new Promise(r=>setTimeout(r,0));
       }
-      if(overLimit){
-        dataSheet.addRow([`Merged sheet skipped: too many time points x ${allV.length} signals exceeds the ${MERGE_CELL_LIMIT.toLocaleString()}-cell limit.`]);
-        dataSheet.addRow(['Trim the time window, then export again.']);
-        dataSheet.getRow(1).font = { bold:true };
-      } else {
-        const times = Array.from(allTimes).sort((a,b)=>a-b);
-        dataSheet.addRow(['Time_s', ...allV.map(s=>s.unit ? `${s.name} [${s.unit}]` : s.name)]);
-        dataSheet.getRow(1).font = { bold:true };
-        const cols = [];
-        for(let si=0; si<allV.length; si++){
-          cols.push(nearestJoin(times, allV[si].points.map(p=>({ t:p.t-t0, v:p.v })), tol));
-          if(si % 8 === 7){ setProg(`Merging (aligning) ${si+1}/${allV.length}`); await new Promise(r=>setTimeout(r,0)); }
+      const times = Array.from(allTimes).sort((a,b)=>a-b);
+
+      // compute each signal's full nearest-join column once against the
+      // full time axis, then slice both dimensions per sheet below —
+      // recomputing nearestJoin per sheet would repeat the same work
+      const allCols = [];
+      for(let si=0; si<allV.length; si++){
+        allCols.push(nearestJoin(times, allV[si].points.map(p=>({ t:p.t-t0, v:p.v })), tol));
+        if(si % 8 === 7){ setProg(`Merging (aligning) ${si+1}/${allV.length}`); await new Promise(r=>setTimeout(r,0)); }
+      }
+
+      const rowGroups = [];
+      for(let i=0;i<times.length;i+=MERGE_ROW_CAP) rowGroups.push([i, Math.min(i+MERGE_ROW_CAP, times.length)]);
+      if(!rowGroups.length) rowGroups.push([0, 0]);
+      const mergePlan = [];
+      for(const [rowStart, rowEnd] of rowGroups){
+        const signalsPerSheet = Math.max(1, Math.floor(MERGE_CELL_BUDGET / Math.max(1, rowEnd - rowStart)));
+        for(let colStart=0; colStart<allV.length; colStart+=signalsPerSheet){
+          mergePlan.push([rowStart, rowEnd, colStart, Math.min(colStart+signalsPerSheet, allV.length)]);
         }
-        const mergedRows = new Array(times.length);
-        for(let i=0;i<times.length;i++){
-          const row = new Array(allV.length + 1);
+      }
+
+      for(let pi=0; pi<mergePlan.length; pi++){
+        const [rowStart, rowEnd, colStart, colEnd] = mergePlan[pi];
+        let label = 'Merged';
+        if(mergePlan.length > 1){
+          label = rowGroups.length > 1
+            ? `Merged t${rowStart+1}-${rowEnd} sig${colStart+1}-${colEnd}`
+            : `Merged signals ${colStart+1}-${colEnd}`;
+        }
+        const sheet = wb.addWorksheet(uniqueSheetName(label, usedNames));
+        sheet.addRow(['Time_s', ...allV.slice(colStart, colEnd).map(s=>s.unit ? `${s.name} [${s.unit}]` : s.name)]);
+        sheet.getRow(1).font = { bold:true };
+        const rows = new Array(rowEnd - rowStart);
+        for(let i=rowStart;i<rowEnd;i++){
+          const row = new Array(colEnd - colStart + 1);
           row[0] = +times[i].toFixed(4);
-          for(let c=0;c<cols.length;c++) row[c+1] = cols[c][i];
-          mergedRows[i] = row;
+          for(let c=colStart;c<colEnd;c++) row[c-colStart+1] = allCols[c][i];
+          rows[i-rowStart] = row;
         }
-        await appendRowsInChunks(dataSheet, mergedRows, 5000, (done,total)=> setProg(`Merging ${Math.round(done/total*100)}%`));
+        await appendRowsInChunks(sheet, rows, 5000, (done,total)=>
+          setProg(`Merging sheet ${pi+1}/${mergePlan.length}: ${Math.round(done/total*100)}%`));
+      }
+      if(mergePlan.length > 1){
+        log(`Merged data split across ${mergePlan.length} sheets `+
+            `(${times.length.toLocaleString()} time points × ${allV.length} signals — `+
+            `Excel's own limit is 1,048,576 rows/sheet).`, 'dim');
       }
 
       // Charts sheet — embed ONLY the ticked signals
@@ -2086,13 +2296,19 @@
       setProg('Writing file…');
       await new Promise(r=>setTimeout(r,0));
       const buffer = await wb.xlsx.writeBuffer();
-      const blob = new Blob([buffer], { type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-      const filename = (logFileName || 'can_log') + '_decoded.xlsx';
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob); a.download = filename;
-      document.body.appendChild(a); a.click(); a.remove();
-      URL.revokeObjectURL(a.href);
-      log(`Downloaded ${filename}.`, 'info');
+      if(fileHandle){
+        const writable = await fileHandle.createWritable();
+        await writable.write(buffer);
+        await writable.close();
+        log(`Saved ${fileHandle.name}.`, 'info');
+      } else {
+        const blob = new Blob([buffer], { type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob); a.download = filename;
+        document.body.appendChild(a); a.click(); a.remove();
+        URL.revokeObjectURL(a.href);
+        log(`Downloaded ${filename} — check your browser's Downloads folder (this browser doesn't support choosing a save location).`, 'info');
+      }
     } catch(e){
       log('Export failed: '+e.message, 'err');
     } finally {
@@ -2106,8 +2322,14 @@
   const supportStatus = document.getElementById('supportStatus');
   if(supportSend){
     supportSend.addEventListener('click', async ()=>{
+      const emailEl = document.getElementById('supportEmail');
       const msgEl = document.getElementById('supportMsg');
+      const email = emailEl.value.trim();
       const msg = msgEl.value.trim();
+      if(!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)){
+        supportStatus.textContent = 'Please add a valid email so we can get back to you.';
+        return;
+      }
       if(!msg){ supportStatus.textContent = 'Write a message first.'; return; }
       supportSend.disabled = true;
       supportStatus.textContent = 'Sending…';
@@ -2115,10 +2337,10 @@
         const res = await fetch('https://formsubmit.co/ajax/dhanoosh2001@gmail.com', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-          body: JSON.stringify({ _subject: 'CANDecode support', message: msg })
+          body: JSON.stringify({ _subject: 'CANDecode support', _replyto: email, email, message: msg })
         });
         if(!res.ok) throw new Error('request failed');
-        supportStatus.textContent = 'Sent ✓ — thanks, you\'ll hear back by email if needed.';
+        supportStatus.textContent = `Sent ✓ — we'll get back to you at ${email}.`;
         msgEl.value = '';
       } catch(err){
         supportStatus.textContent = 'Send failed — email dhanoosh2001@gmail.com directly instead.';

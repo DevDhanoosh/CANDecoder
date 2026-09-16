@@ -686,7 +686,10 @@ def analyze_bus_health(frames, dur_sec, frame_name_by_id, baudrate=500000.0,
       per_id : list of dicts sorted by frame count desc —
                {id, name, count, hz, avg_gap_ms, std_gap_ms, max_gap_ms, dropout}
                A "dropout" flag means that ID's longest gap was more than
-               dropout_mult x its own median gap.
+               dropout_mult x its own median gap — excluding any gap that
+               overlaps a BUS-OFF/Power-OFF event, since that's the whole
+               bus going quiet, not this ID uniquely misbehaving. max_gap_ms
+               itself still reports the true longest gap either way.
       bins, load : ndarrays, one point per window_sec bin — bin start (s
                from the first frame) and estimated load (%).
       load_avg, load_peak : float, percent.
@@ -703,6 +706,22 @@ def analyze_bus_health(frames, dur_sec, frame_name_by_id, baudrate=500000.0,
     ts = np.fromiter((f.t for f in frames), float, len(frames))
     t0 = float(ts.min())
 
+    # computed up front so the per-ID dropout check below can exclude gaps
+    # that are just that ID going quiet because the WHOLE bus went quiet
+    # (a BUS-OFF / Power-OFF event) — otherwise one bus-wide outage would
+    # mark every ID active around it as individually "dropped out"
+    bus_off = detect_bus_off_gaps(frames, gap_threshold_sec)
+
+    def _max_gap_excluding_busoff(times, gaps):
+        if not bus_off or not len(gaps):
+            return float(gaps.max()) if len(gaps) else 0.0
+        starts, ends = times[:-1], times[1:]
+        overlap = np.zeros(len(gaps), dtype=bool)
+        for g in bus_off:
+            overlap |= (starts < g["end_t"]) & (ends > g["start_t"])
+        remaining = gaps[~overlap]
+        return float(remaining.max()) if len(remaining) else 0.0
+
     by_id = {}
     for f in frames:
         by_id.setdefault(f.id, []).append(f.t)
@@ -714,7 +733,8 @@ def analyze_bus_health(frames, dur_sec, frame_name_by_id, baudrate=500000.0,
         dropout = False
         if len(gaps) >= 4:
             med = float(np.median(gaps))
-            if med > 0 and float(gaps.max()) > dropout_mult * med:
+            max_own_gap = _max_gap_excluding_busoff(times, gaps)
+            if med > 0 and max_own_gap > dropout_mult * med:
                 dropout = True
         per_id.append(dict(
             id=cid, name=frame_name_by_id.get(cid, ""), count=n,
@@ -742,7 +762,6 @@ def analyze_bus_health(frames, dur_sec, frame_name_by_id, baudrate=500000.0,
     bin_durs[-1] = dur_sec - (n_bins - 1) * window_sec
     load_pct = bin_bits / (bin_durs * baudrate) * 100.0
     bin_starts = np.arange(n_bins) * window_sec
-    bus_off = detect_bus_off_gaps(frames, gap_threshold_sec)
 
     return dict(per_id=per_id, bins=bin_starts, load=load_pct,
                load_avg=float(load_pct.mean()), load_peak=float(load_pct.max()),
@@ -1064,17 +1083,24 @@ def export_excel(path, meta, dbc_names, series, frames, frame_name_by_id,
                        round(st["min"], 4), round(st["max"], 4),
                        round(st["mean"], 4), round(st["std"], 4)])
 
-    # CAN Frames (full raw trace)
+    # CAN Frames (full raw trace) — Excel hard-caps a sheet at 1,048,576 rows
+    # (including the header); a trace with more frames than that would lose
+    # data — or produce an invalid file — on a single sheet. Spill into
+    # "CAN Frames_2", "CAN Frames_3", ... so every frame still lands somewhere.
     if "frames" in sections:
         _p(0.06, "Writing CAN frames…")
-        ws = wb.create_sheet(_safe_sheet("CAN Frames", used))
-        ws.append(["Time_s", "Clock", "CAN_ID", "Type", "Message", "DLC",
-                   "Data (hex)", "B0", "B1", "B2", "B3", "B4", "B5", "B6", "B7"])
-        for cell in ws[1]:
-            cell.font = bold
+        FRAME_HEADER = ["Time_s", "Clock", "CAN_ID", "Type", "Message", "DLC",
+                        "Data (hex)", "B0", "B1", "B2", "B3", "B4", "B5", "B6", "B7"]
+        FRAMES_PER_SHEET = 1_000_000  # headroom under Excel's 1,048,576 row cap
         ft0 = t0
         nf = max(1, len(frames))
+        ws = None
         for idx, f in enumerate(tqdm(frames, desc="Excel: frames", unit="fr")):
+            if idx % FRAMES_PER_SHEET == 0:
+                ws = wb.create_sheet(_safe_sheet("CAN Frames", used))
+                ws.append(FRAME_HEADER)
+                for cell in ws[1]:
+                    cell.font = bold
             hexbytes = [f"{b:02X}" for b in f.data]
             row = [round(f.t - ft0, 4), _sec_to_clock(f.t), f"0x{f.id:X}",
                    "Ext" if f.extended else "Std",
@@ -1083,39 +1109,69 @@ def export_excel(path, meta, dbc_names, series, frames, frame_name_by_id,
             ws.append(row)
             if progress and idx % 3000 == 0:
                 _p(0.06 + 0.44 * idx / nf, "Writing CAN frames…")
+        if ws is None:                          # no frames at all — keep the header-only sheet
+            ws = wb.create_sheet(_safe_sheet("CAN Frames", used))
+            ws.append(FRAME_HEADER)
+            for cell in ws[1]:
+                cell.font = bold
+        frame_sheet_count = max(1, -(-len(frames) // FRAMES_PER_SHEET))
+        if frame_sheet_count > 1:
+            print(f"  CAN Frames split across {frame_sheet_count} sheets "
+                  f"({len(frames):,} frames, {FRAMES_PER_SHEET:,} per sheet — "
+                  f"Excel's own limit is 1,048,576 rows/sheet).")
 
-    # Merged (as-of, nearest within tol)
+    # Merged (as-of, nearest within tol) — split across sheets instead of
+    # skipping when it's too big: by signal (column) groups to stay under a
+    # sane per-sheet cell budget, and by time (row) groups too if the trace
+    # has more unique timestamps than Excel allows on one sheet (1,048,576
+    # rows) — so nothing is ever dropped, it just spills onto more sheets.
     if series and "merged" in sections:
         _p(0.52, "Writing merged sheet…")
         all_times = np.unique(np.round(
             np.concatenate([s["t"] - t0 for s in series]), 4))
-        ws = wb.create_sheet(_safe_sheet("Merged", used))
-        ncell = len(all_times) * len(series)
-        if ncell > 1_500_000:
-            ws.append([f"Merged sheet skipped: {len(all_times)} time points x "
-                       f"{len(series)} signals = {ncell:,} cells exceeds the "
-                       f"1,500,000-cell limit."])
-            ws.append(["Trim the time window, then export again."])
-            ws["A1"].font = bold
-        else:
-            ws.append(["Time_s"] + [f"{s['name']} [{s['unit']}]" if s["unit"]
-                                    else s["name"] for s in series])
+        MERGE_CELL_BUDGET = 1_500_000
+        MERGE_ROW_CAP = 1_000_000        # headroom under Excel's 1,048,576 row limit
+
+        cols = []
+        for s in tqdm(series, desc="Excel: merge", unit="sig"):
+            cols.append(merge_asof_nearest(all_times, s["t"] - t0, s["v"], tol))
+        cols = np.array(cols)                            # (nsig, ntimes)
+
+        n_times = len(all_times)
+        row_groups = [(i, min(i + MERGE_ROW_CAP, n_times))
+                     for i in range(0, n_times, MERGE_ROW_CAP)] or [(0, 0)]
+        merge_plan = []
+        for row_start, row_end in row_groups:
+            signals_per_sheet = max(1, MERGE_CELL_BUDGET // max(1, row_end - row_start))
+            for col_start in range(0, len(series), signals_per_sheet):
+                merge_plan.append((row_start, row_end, col_start,
+                                   min(col_start + signals_per_sheet, len(series))))
+
+        nt = max(1, n_times)
+        for pi, (row_start, row_end, col_start, col_end) in enumerate(merge_plan):
+            if len(merge_plan) == 1:
+                label = "Merged"
+            elif len(row_groups) > 1:
+                label = f"Merged t{row_start+1}-{row_end} sig{col_start+1}-{col_end}"
+            else:
+                label = f"Merged signals {col_start+1}-{col_end}"
+            ws = wb.create_sheet(_safe_sheet(label, used))
+            ws.append(["Time_s"] + [f"{s['name']} [{s['unit']}]" if s["unit"] else s["name"]
+                                    for s in series[col_start:col_end]])
             for cell in ws[1]:
                 cell.font = bold
-            cols = []
-            for s in tqdm(series, desc="Excel: merge", unit="sig"):
-                col = merge_asof_nearest(all_times, s["t"] - t0, s["v"], tol)
-                cols.append(col)
-            cols = np.array(cols)                       # (nsig, ntimes)
-            nt = max(1, len(all_times))
-            for i in range(len(all_times)):
+            for i in range(row_start, row_end):
                 row = [round(float(all_times[i]), 4)]
-                for c in range(cols.shape[0]):
+                for c in range(col_start, col_end):
                     val = cols[c, i]
                     row.append("" if np.isnan(val) else round(float(val), 4))
                 ws.append(row)
                 if progress and i % 4000 == 0:
-                    _p(0.55 + 0.15 * i / nt, "Writing merged sheet…")
+                    _p(0.55 + 0.15 * i / nt, f"Writing merged sheet {pi+1}/{len(merge_plan)}…")
+        if len(merge_plan) > 1:
+            print(f"  Merged data split across {len(merge_plan)} sheets "
+                  f"({n_times:,} time points x {len(series)} signals — "
+                  f"Excel's own limit is 1,048,576 rows/sheet).")
 
     # Charts sheet — embed the per-signal PNGs
     single = [p for p in plot_paths if not os.path.basename(p).startswith("_")]
@@ -1267,7 +1323,11 @@ def main():
     fmt_label = {"minimon": "IXXAT MiniMon CSV", "candump": "candump (SocketCAN)"}.get(fmt, "BUSMASTER")
     print(f"  detected format : {fmt_label}")
     if not frames:
-        sys.exit("  no frames parsed — check the file / format.")
+        sys.exit(
+            "  no frames parsed — this file doesn't look like a supported trace format.\n"
+            "  Supported formats: BUSMASTER .log, MiniMon-compatible quoted CSV, and candump/SocketCAN log.\n"
+            "  Need another format supported? Email dhanoosh2001@gmail.com with your email ID so we can update you."
+        )
     print(f"  validation      : {len(frames)} frame(s) — "
           f"{counts['std']} std, {counts['ext']} ext, {counts['malformed']} skipped")
     print(f"  date/duration   : {meta['date']}  |  {meta['duration']}")

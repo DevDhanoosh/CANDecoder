@@ -1234,7 +1234,12 @@ def main():
     fmt_label = "Quoted CSV trace" if fmt == "csv" else "BUSMASTER"
     print(f"  detected format : {fmt_label}")
     if not frames:
-        sys.exit("  no frames parsed — check the file / format.")
+        sys.exit(
+            "  no frames parsed — this file doesn't look like a supported trace format.\n"
+            "  candecode.py supports: BUSMASTER .log and MiniMon-compatible quoted CSV.\n"
+            "  For candump/SocketCAN logs, use can_log_analyzer.py or the candecode.html web tool instead.\n"
+            "  Need another format supported? Email dhanoosh2001@gmail.com with your email ID so we can update you."
+        )
     print(f"  validation      : {len(frames)} frame(s) — "
           f"{counts['std']} std, {counts['ext']} ext, {counts['malformed']} skipped, "
           f"{len(errors)} error frame(s)")

@@ -657,7 +657,11 @@ class App:
             prog(0.35, "Loading log…")
             fmt, frames, counts, meta = core.load_log(self.log_path)
             if not frames:
-                raise RuntimeError("No frames parsed from the log.")
+                raise RuntimeError(
+                    "No frames parsed — this file doesn't look like a supported trace format.\n"
+                    "Supported formats: BUSMASTER .log, MiniMon-compatible quoted CSV, and candump/SocketCAN log.\n"
+                    "Need another format supported? Email dhanoosh2001@gmail.com with your email ID so we can update you."
+                )
             prog(0.6, "Decoding signals…")
             series, matched = core.decode_all(frames, messages, None)
             prog(1.0, "")

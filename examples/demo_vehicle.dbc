@@ -1,0 +1,21 @@
+VERSION ""
+
+NS_ :
+
+BS_:
+
+BU_: ECU BMS VCU
+
+BO_ 256 Motor_Controller: 8 ECU
+ SG_ MotorSpeed : 0|16@1+ (0.25,0) [0|8000] "rpm" VCU
+ SG_ MotorTorque : 16|16@1- (0.1,0) [-500|500] "Nm" VCU
+
+BO_ 512 Battery_Management: 8 BMS
+ SG_ PackVoltage : 0|16@1+ (0.1,0) [0|500] "V" VCU
+ SG_ PackCurrent : 16|16@1- (0.1,0) [-500|500] "A" VCU
+ SG_ StateOfCharge : 32|8@1+ (0.5,0) [0|100] "%" VCU
+
+BO_ 768 Vehicle_Status: 8 VCU
+ SG_ VehicleSpeed : 0|16@1+ (0.1,0) [0|250] "km/h" ECU
+ SG_ CoolantTemp : 16|8@1+ (1,-40) [-40|150] "degC" ECU
+ SG_ GearPosition : 24|4@1+ (1,0) [0|7] "" ECU

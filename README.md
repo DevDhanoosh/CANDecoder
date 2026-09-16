@@ -38,6 +38,11 @@ work added to the other two, so it doesn't have those yet; reach for
     the live/`-t`-timestamped console format (`can0  123   [8]  11 22 ...`).
     Handles extended IDs, remote frames, and basic CAN FD.
 
+  If a trace doesn't match any of these formats, decoding stops with a clear
+  error naming the formats above instead of crashing. Need another format
+  supported? Email dhanoosh2001@gmail.com with your email ID so we can update
+  you.
+
 ## Signal selection and charts
 
 - **CAN-ID checkbox tree** *(candecode.html, CAN Signal Bench)* — signals are
@@ -63,7 +68,10 @@ work added to the other two, so it doesn't have those yet; reach for
   directly from the frame timestamps in your trace, so it's exact. A
   "dropout" flag means that ID's longest gap was more than 3× its own
   median gap — i.e. something that normally arrives on a regular beat went
-  quiet for a while.
+  quiet for a while — **excluding** any gap that overlaps a BUS-OFF/Power-OFF
+  event (below), since that's the whole bus going quiet, not this one ID
+  misbehaving. Max gap (ms) in the table still reports the true longest gap
+  either way; only the dropout flag itself excludes it.
 - **BUS-OFF / Power-OFF detection** *(candecode.html, CAN Signal Bench, and
   `can_log_analyzer.py --bus-health`)* — flags any stretch where **no frame
   of any CAN ID** was seen for longer than a configurable threshold (default
@@ -102,11 +110,17 @@ One `.xlsx` workbook with:
 - **Log Info** — format, date/time window, duration, DBC files used, message
   IDs matched, signal count.
 - **Summary** — min/max/mean/std for **every** decoded signal.
-- **CAN Frames** — the full raw trace, one row per frame.
+- **CAN Frames** — the full raw trace, one row per frame. If a trace has more
+  frames than Excel allows on one sheet, it automatically continues onto
+  `CAN Frames_2`, `CAN Frames_3`, etc. — see Performance & limits below.
 - **Merged** — every decoded signal time-aligned onto one shared timeline
   (nearest-value join within a configurable tolerance), one column per
   signal. This always covers the full decoded set, independent of what
-  you've ticked for charting.
+  you've ticked for charting. If the merged table would exceed Excel's
+  ~1.5M-cell comfort limit (a lot of time points × a lot of signals), it's
+  automatically split across multiple sheets — by signal groups
+  (`Merged signals 1-35`, `Merged signals 36-50`, ...) and, for very long
+  traces, by time ranges too — instead of being skipped.
 - **Charts** — embedded plots for only the signals you ticked / requested.
 - **Bus Health** — per-message-ID frequency (Hz), inter-frame gap
   mean/std/max, dropout flags, an estimated bus-load-over-time chart,
@@ -116,6 +130,42 @@ One `.xlsx` workbook with:
 There are no per-signal sheets — with dozens or hundreds of signals in a
 DBC, one sheet per signal stops being useful; the Merged sheet is the
 column-per-signal alternative.
+
+## Performance & limits
+
+**Duration isn't the constraint — frame count is.** A full day of logging is
+fine on its own; what matters is how many CAN frames that day actually
+contains, not how many hours it spans. A day of light/occasional traffic
+(tens of thousands of frames) is trivial. A day of a busy vehicle bus running
+at hundreds of messages/second is tens of millions of frames, and that's a
+genuinely large amount of data for any single browser tab or desktop process
+to hold in memory at once — trim to the time window you actually need to
+analyze if you're in that territory.
+
+**In the browser tool (candecode.html):** decoding — log parsing, signal
+extraction, bus-health stats — yields control back to the browser
+periodically instead of running as one uninterrupted block, so the tab stays
+responsive and shows live progress in the Console stage even on a large
+trace. Before this fix, a big enough trace (well within "a full day of
+logging" territory) could block the tab long enough that the browser
+considered it unresponsive and offered to kill it, or ran out of memory
+outright — that's what "the page crashes" meant, and it's now fixed. Rough
+guidance: comfortably tested up to a few million frames; files over 100 MB
+get a heads-up in the console, since a browser tab realistically has a few
+GB of memory to work with, shared across the raw text, the parsed frames,
+and every decoded signal's samples.
+
+**In the exported Excel workbook:** Excel itself hard-caps every sheet at
+1,048,576 rows, independent of what generated the file. A trace with more
+frames than that used to mean lost data (or an invalid file) on the CAN
+Frames sheet — now it automatically continues onto additional sheets
+(`CAN Frames_2`, `CAN Frames_3`, ...) so nothing is dropped. This applies to
+both the HTML tool and `can_log_analyzer.py`'s export.
+
+**CAN Signal Bench and the CLI scripts** run as a normal desktop process, so
+they aren't subject to a browser tab's memory ceiling — but very large traces
+still take proportionally longer to parse and decode, and use more RAM while
+doing it.
 
 ## Using the HTML tool
 
